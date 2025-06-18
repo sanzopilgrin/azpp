@@ -656,8 +656,7 @@ Examples:
     report_filename = f"vnet_peering_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     manager.generate_html_report(report_filename)
     
-    print(f"\n🎉 Peering management completed! Check {report_filename} for details.") pair {hub_file} <-> {spoke_file}: {e}")
-            continue
+    print(f"\n🎉 Peering management completed! Check {report_filename} for details.")
     
     # Cleanup orphaned peerings if not skipped
     if not args.skip_cleanup:
