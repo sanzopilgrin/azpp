@@ -14,22 +14,38 @@ from datetime import datetime
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Set
 
-from azure.identity import DefaultAzureCredential
+from azure.identity import ClientSecretCredential
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.network.models import VirtualNetwork, VirtualNetworkPeering
+from azure.mgmt.subscription import SubscriptionClient
 from tabulate import tabulate
 
 
 class VNetPeeringManager:
     """Manages Azure VNet peering operations."""
     
-    def __init__(self, subscription_ids: List[str]):
-        """Initialize the peering manager with subscription IDs."""
-        self.subscription_ids = subscription_ids
-        self.credential = DefaultAzureCredential()
+    def __init__(self, hub_subscription_ids: List[str], spoke_exclude_subscription_ids: List[str], 
+                 tenant_id: str, client_id: str, client_secret: str):
+        """Initialize the peering manager with hub subscriptions and spoke exclusions."""
+        self.hub_subscription_ids = hub_subscription_ids
+        self.spoke_exclude_subscription_ids = spoke_exclude_subscription_ids or []
+        self.tenant_id = tenant_id
+        self.credential = self._get_credential(tenant_id, client_id, client_secret)
+        
+        # Get all subscriptions in the tenant for spoke VNets
+        self.all_subscription_ids = self._get_all_tenant_subscriptions()
+        
+        # Determine spoke subscriptions (all except excluded)
+        self.spoke_subscription_ids = [
+            sub_id for sub_id in self.all_subscription_ids 
+            if sub_id not in self.spoke_exclude_subscription_ids
+        ]
+        
+        # Create clients for all subscriptions we'll need
+        all_needed_subs = set(self.hub_subscription_ids + self.spoke_subscription_ids)
         self.clients = {
             sub_id: NetworkManagementClient(self.credential, sub_id)
-            for sub_id in subscription_ids
+            for sub_id in all_needed_subs
         }
         
         # Report data structure
@@ -39,6 +55,48 @@ class VNetPeeringManager:
             "all_peerings": [],
             "deleted_orphans": []
         }
+        
+        print(f"📊 Subscription Configuration:")
+        print(f"   Hub Subscriptions: {len(self.hub_subscription_ids)}")
+        print(f"   Total Tenant Subscriptions: {len(self.all_subscription_ids)}")
+        print(f"   Excluded from Spokes: {len(self.spoke_exclude_subscription_ids)}")
+        print(f"   Spoke Subscriptions: {len(self.spoke_subscription_ids)}")
+    
+    def _get_credential(self, tenant_id: str, client_id: str, client_secret: str) -> ClientSecretCredential:
+        """Get Azure credentials using Client Secret."""
+        if not all([tenant_id, client_id, client_secret]):
+            missing = []
+            if not tenant_id:
+                missing.append("tenant_id")
+            if not client_id:
+                missing.append("client_id")
+            if not client_secret:
+                missing.append("client_secret")
+            raise ValueError(f"Missing required credentials: {', '.join(missing)}")
+        
+        return ClientSecretCredential(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret
+        )
+    
+    def _get_all_tenant_subscriptions(self) -> List[str]:
+        """Get all subscription IDs in the tenant."""
+        try:
+            subscription_client = SubscriptionClient(self.credential)
+            subscriptions = []
+            
+            print("🔍 Discovering all subscriptions in tenant...")
+            for sub in subscription_client.subscriptions.list():
+                if sub.state == "Enabled":
+                    subscriptions.append(sub.subscription_id)
+                    print(f"   Found: {sub.display_name} ({sub.subscription_id})")
+            
+            return subscriptions
+        except Exception as e:
+            print(f"❌ Failed to list tenant subscriptions: {e}")
+            print("   Falling back to using only explicitly provided subscriptions")
+            return self.hub_subscription_ids
     
     def load_regions(self, filename: str) -> List[str]:
         """Load region list from file."""
@@ -65,12 +123,21 @@ class VNetPeeringManager:
     
     def get_vnets_by_criteria(self, regions: List[str], prefixes: List[str], 
                              tag_key: Optional[str] = None, 
-                             tag_value_contains: Optional[str] = None) -> List[VirtualNetwork]:
-        """Get VNets matching specified criteria across all subscriptions."""
+                             tag_value_contains: Optional[str] = None,
+                             subscription_ids: Optional[List[str]] = None) -> List[VirtualNetwork]:
+        """Get VNets matching specified criteria across specified subscriptions."""
         vnets = []
         region_lower = [r.lower() for r in regions]
         
-        for sub_id, client in self.clients.items():
+        # Use provided subscription list or default to all clients
+        target_subscriptions = subscription_ids if subscription_ids else list(self.clients.keys())
+        
+        for sub_id in target_subscriptions:
+            if sub_id not in self.clients:
+                print(f"⚠️  Skipping subscription {sub_id} - no client available")
+                continue
+                
+            client = self.clients[sub_id]
             try:
                 print(f"🔍 Scanning subscription: {sub_id}")
                 for vnet in client.virtual_networks.list_all():
@@ -95,7 +162,7 @@ class VNetPeeringManager:
                 print(f"⚠️  Failed to scan subscription {sub_id}: {e}")
                 continue
         
-        print(f"✅ Found {len(vnets)} VNets matching criteria")
+        print(f"✅ Found {len(vnets)} VNets matching criteria in {len(target_subscriptions)} subscriptions")
         return vnets
     
     def generate_peering_name(self, vnet_a_name: str, vnet_b_name: str, max_length: int = 79) -> str:
@@ -260,10 +327,11 @@ class VNetPeeringManager:
         """Clean up orphaned peerings that point to non-existent VNets."""
         print(f"\n🧹 Cleaning up orphaned peerings {'(DRY RUN)' if dry_run else ''}")
         
-        # Build set of all valid VNet IDs
+        # Build set of all valid VNet IDs across all subscriptions
         valid_vnet_ids = set()
         valid_region_lower = {r.lower() for r in valid_regions}
         
+        # Check all subscriptions for valid VNets
         for sub_id, client in self.clients.items():
             try:
                 for vnet in client.virtual_networks.list_all():
@@ -272,7 +340,7 @@ class VNetPeeringManager:
             except Exception as e:
                 print(f"⚠️  Failed to list VNets in subscription {sub_id}: {e}")
         
-        # Find and delete orphaned peerings
+        # Find and delete orphaned peerings in all subscriptions
         for sub_id, client in self.clients.items():
             try:
                 for vnet in client.virtual_networks.list_all():
@@ -315,18 +383,22 @@ class VNetPeeringManager:
             print("⚠️  Skipping region pair due to missing regions")
             return
         
-        # Get hub VNets (cngfw-az with hub tag)
+        # Get hub VNets (cngfw-az with hub tag) - ONLY from hub subscriptions
+        print(f"\n🔍 Searching for hub VNets in {len(self.hub_subscription_ids)} hub subscriptions...")
         hub_vnets = self.get_vnets_by_criteria(
             regions=hub_regions,
             prefixes=["cngfw-az"],
             tag_key="appname",
-            tag_value_contains="hub"
+            tag_value_contains="hub",
+            subscription_ids=self.hub_subscription_ids  # Only search in hub subscriptions
         )
         
-        # Get spoke VNets (opencti, MISP)
+        # Get spoke VNets (opencti, MISP) - from all subscriptions except excluded
+        print(f"\n🔍 Searching for spoke VNets in {len(self.spoke_subscription_ids)} spoke subscriptions...")
         spoke_vnets = self.get_vnets_by_criteria(
             regions=spoke_regions,
-            prefixes=["opencti", "MISP"]
+            prefixes=["opencti", "MISP"],
+            subscription_ids=self.spoke_subscription_ids  # Search in all non-excluded subscriptions
         )
         
         if not hub_vnets:
@@ -387,7 +459,9 @@ class VNetPeeringManager:
             <h1>🔗 Azure VNet Peering Report</h1>
             <div class="summary">
                 <strong>Generated:</strong> {timestamp}<br>
-                <strong>Subscriptions:</strong> {len(self.subscription_ids)}<br>
+                <strong>Hub Subscriptions:</strong> {len(self.hub_subscription_ids)}<br>
+                <strong>Spoke Subscriptions:</strong> {len(self.spoke_subscription_ids)} (from {len(self.all_subscription_ids)} total tenant subscriptions)<br>
+                <strong>Excluded Subscriptions:</strong> {len(self.spoke_exclude_subscription_ids)}<br>
                 <strong>Successful Peerings:</strong> {len(self.report_data['successful_peerings'])}<br>
                 <strong>Failed Peerings:</strong> {len(self.report_data['failed_peerings'])}<br>
                 <strong>Deleted Orphans:</strong> {len(self.report_data['deleted_orphans'])}
@@ -462,11 +536,45 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python script.py                    # Normal operation
-  python script.py --dry-run          # Dry run mode (no changes)
-  python script.py --regions-only     # Only process specific region pairs
+  # Basic usage with hub subscriptions only
+  python script.py --hub-subscription-ids sub1,sub2 --tenant-id xxx --client-id yyy --client-secret zzz
+  
+  # Exclude specific subscriptions from spoke search
+  python script.py --hub-subscription-ids sub1 --spoke-exclude-subscription-ids sub3,sub4 --tenant-id xxx --client-id yyy --client-secret zzz
+  
+  # Dry run mode
+  python script.py --hub-subscription-ids sub1 --tenant-id xxx --client-id yyy --client-secret zzz --dry-run
         """
     )
+    
+    # Azure credential arguments
+    parser.add_argument(
+        "--tenant-id",
+        required=True,
+        help="Azure AD tenant ID"
+    )
+    parser.add_argument(
+        "--client-id",
+        required=True,
+        help="Service principal client ID"
+    )
+    parser.add_argument(
+        "--client-secret",
+        required=True,
+        help="Service principal client secret"
+    )
+    parser.add_argument(
+        "--hub-subscription-ids",
+        required=True,
+        help="Comma-separated list of subscription IDs containing hub VNets"
+    )
+    parser.add_argument(
+        "--spoke-exclude-subscription-ids",
+        default="",
+        help="Comma-separated list of subscription IDs to exclude from spoke VNet search (optional)"
+    )
+    
+    # Optional arguments
     parser.add_argument(
         "--dry-run", 
         action="store_true", 
@@ -478,19 +586,47 @@ Examples:
         help="Skip orphan peering cleanup"
     )
     
+    # Parse arguments
     args = parser.parse_args()
     
-    # Get subscription IDs from environment
-    subscription_ids = os.environ.get("AZURE_SUBSCRIPTION_IDS")
-    if not subscription_ids:
-        print("❌ Please set AZURE_SUBSCRIPTION_IDS environment variable (comma-separated list)")
+    # Parse subscription IDs
+    hub_subscriptions = [sub.strip() for sub in args.hub_subscription_ids.split(",") if sub.strip()]
+    if not hub_subscriptions:
+        print("❌ No valid hub subscription IDs provided")
         sys.exit(1)
     
-    subscriptions = [sub.strip() for sub in subscription_ids.split(",") if sub.strip()]
-    print(f"🎯 Managing peerings across {len(subscriptions)} subscriptions")
+    # Parse excluded subscription IDs (can be empty)
+    spoke_exclude_subscriptions = []
+    if args.spoke_exclude_subscription_ids:
+        spoke_exclude_subscriptions = [
+            sub.strip() for sub in args.spoke_exclude_subscription_ids.split(",") if sub.strip()
+        ]
     
-    # Initialize peering manager
-    manager = VNetPeeringManager(subscriptions)
+    print(f"🎯 Configuration:")
+    print(f"   Hub Subscriptions: {len(hub_subscriptions)}")
+    print(f"   Excluded from Spokes: {len(spoke_exclude_subscriptions)}")
+    
+    # Initialize peering manager with command-line arguments
+    try:
+        manager = VNetPeeringManager(
+            hub_subscription_ids=hub_subscriptions,
+            spoke_exclude_subscription_ids=spoke_exclude_subscriptions,
+            tenant_id=args.tenant_id,
+            client_id=args.client_id,
+            client_secret=args.client_secret
+        )
+        print(f"✅ Successfully authenticated with Azure using Service Principal")
+    except ValueError as e:
+        print(f"❌ Authentication failed: {e}")
+        print("\n📋 Required arguments:")
+        print("   --tenant-id: Azure AD tenant ID") 
+        print("   --client-id: Service principal client ID")
+        print("   --client-secret: Service principal client secret")
+        print("   --hub-subscription-ids: Comma-separated list of hub subscription IDs")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Failed to initialize peering manager: {e}")
+        sys.exit(1)
     
     # Define region pairs
     region_pairs = [
@@ -505,6 +641,22 @@ Examples:
             manager.process_region_pair(hub_file, spoke_file)
         except Exception as e:
             print(f"❌ Failed to process region pair {hub_file} <-> {spoke_file}: {e}")
+            continue
+    
+    # Cleanup orphaned peerings if not skipped
+    if not args.skip_cleanup:
+        valid_regions = set()
+        for hub_file, spoke_file in region_pairs:
+            valid_regions.update(manager.load_regions(hub_file))
+            valid_regions.update(manager.load_regions(spoke_file))
+        
+        manager.cleanup_orphan_peerings(valid_regions, dry_run=args.dry_run)
+    
+    # Generate final report
+    report_filename = f"vnet_peering_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    manager.generate_html_report(report_filename)
+    
+    print(f"\n🎉 Peering management completed! Check {report_filename} for details.") pair {hub_file} <-> {spoke_file}: {e}")
             continue
     
     # Cleanup orphaned peerings if not skipped
