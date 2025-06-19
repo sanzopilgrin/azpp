@@ -1,7 +1,7 @@
 ---
 # GitLab CI Configuration for CNGFW VNet Peering Report
 
-# Define global variables to reduce repetition
+# Global variables to reduce repetition
 variables:
   # Azure and Authentication Variables
   ARM_TENANT_ID: "9d1d17d8-372b-4b23"
@@ -23,132 +23,197 @@ stages:
 
 # Job to run VNet Peering Check
 test-cngfw-peering-ops:
-  image: docker.ptt.dev/dockerhub/python:latest
+  image:
+    name: docker.ptt.dev/dockerhub/python:latest
+    entrypoint: ['']
+
   stage: deploy
   
   # Securely pass sensitive information
   variables:
-    # Use masked variables for sensitive credentials
     SVC_SECURITY_TERRA_ID: $SVC_SECURITY_TERRA_ID
     SVC_SECURITY_TERRA_SEC: $SVC_SECURITY_TERRA_SEC
     SENDGRID_API_KEY: $SENDGRID_API_KEY
 
-  environment:
-    name: SECENG_ENV
-
-  # Setup Python virtual environment and dependencies
+  # Install necessary system dependencies
   before_script:
-    - cd pipelines/__py
-    - python3 -m venv .venvsec 
-    - source .venvsec/bin/activate 
-    - python -m pip install --upgrade pip
-    - python -m pip install -r requirements.txt
+    - apt-get update && apt-get install -y curl jq
 
-  # Main script to run VNet peering check
+  # Main job script
   script:
-    - python main.py 
-      --hub-subscription-ids 0a1d3787-531c-4354-98cc-c06d32af70,5d7d2ebb-f250-48c2-9553-1776839a73 
-      --auth-method service_principal 
-      --tenant-id "$ARM_TENANT_ID" 
-      --client-id "$SVC_SECURITY_TERRA_ID" 
-      --client-secret "$SVC_SECURITY_TERRA_SEC" 
-      --skip-cleanup
+    - |
+      # Change to project directory
+      cd pipelines/__py
+
+      # Setup Python virtual environment
+      python3 -m venv .venvsec 
+      source .venvsec/bin/activate 
+      
+      # Upgrade pip and install dependencies
+      python -m pip install --upgrade pip
+      python -m pip install -r requirements.txt
+
+      # Run VNet peering check script
+      python main.py \
+        --hub-subscription-ids 0a1d3787-531c-4354-98cc-c06d32af70,5d7d2ebb-f250-48c2-9553-1776839a73 \
+        --auth-method service_principal \
+        --tenant-id "$ARM_TENANT_ID" \
+        --client-id "$SVC_SECURITY_TERRA_ID" \
+        --client-secret "$SVC_SECURITY_TERRA_SEC" \
+        --skip-cleanup
 
   # Preserve artifacts for debugging and reporting
   artifacts:
     paths:
       - pipelines/__py/
-    expire_in: 1 week  # Optional: control artifact retention
+    expire_in: 1 week
 
   # Notification and cleanup script
   after_script:
     - |
       # Ensure script continues even if some steps fail
-      set +e
+      set -e
 
-      # Construct email body with GitLab job information
+      # Function to escape JSON strings using jq
+      escape_json() {
+        printf '%s' "$1" | jq -R -s '.'
+      }
+
+      # Capture job details
       JOB_URL="${CI_JOB_URL}"
-      EMAIL_BODY="Please find attached the detailed CNGFW - Azure VNets Peerings Report.\n\nJob Details:\n- Job URL: ${JOB_URL}\n- Commit: ${CI_COMMIT_SHORT_SHA}\n- Branch: ${CI_COMMIT_REF_NAME}"
+      JOB_REF="${CI_COMMIT_REF_NAME}"
+      JOB_COMMIT="${CI_COMMIT_SHORT_SHA}"
 
-      # Initialize attachments JSON
-      ATTACHMENTS_JSON=""
+      # Prepare base email body
+      BASE_EMAIL_BODY="Please find attached the detailed CNGFW - Azure VNets Peerings Report.
 
-      # Function to safely add attachment
-      add_attachment() {
-        local filepath="$1"
-        local filetype="$2"
-        local filename="$3"
+Job Details:
+- Job URL: ${JOB_URL}
+- Commit: ${JOB_COMMIT}
+- Branch: ${JOB_REF}"
 
-        if [ -f "$filepath" ]; then
-          CONTENT=$(base64 -w 0 "$filepath")
-          ATTACHMENTS_JSON="${ATTACHMENTS_JSON:+$ATTACHMENTS_JSON,}{
-            \"content\": \"$CONTENT\",
-            \"type\": \"$filetype\",
-            \"filename\": \"$filename\",
+      # Escape the base email body
+      EMAIL_BODY_ESCAPED=$(escape_json "$BASE_EMAIL_BODY")
+
+      # Function to create attachments JSON
+      create_attachments_json() {
+        local attachments_json="["
+        local first_attachment=true
+
+        # Check and add comprehensive report
+        if [ -f "$COMPREHENSIVE_R_ATTACHMENT_PATH" ]; then
+          local comp_content=$(base64 -w 0 "$COMPREHENSIVE_R_ATTACHMENT_PATH")
+          attachments_json+="{
+            \"content\": \"$comp_content\",
+            \"type\": \"text/html\",
+            \"filename\": \"vnet_peering_report.html\",
+            \"disposition\": \"attachment\"
+          }"
+          first_attachment=false
+        fi
+
+        # Check and add log file
+        if [ -f "$LOG_ATTACHMENT_PATH" ]; then
+          local log_content=$(base64 -w 0 "$LOG_ATTACHMENT_PATH")
+          if [ "$first_attachment" = false ]; then
+            attachments_json+=","
+          fi
+          attachments_json+="{
+            \"content\": \"$log_content\",
+            \"type\": \"text/plain\",
+            \"filename\": \"vnet_peering.log\",
             \"disposition\": \"attachment\"
           }"
         fi
+
+        attachments_json+="]"
+        echo "$attachments_json"
       }
 
-      # Add comprehensive report
-      add_attachment "$COMPREHENSIVE_R_ATTACHMENT_PATH" "text/html" "vnet_peering_report.html"
+      # Function to send email via SendGrid
+      send_sendgrid_email() {
+        local to_email="$1"
+        local subject="$2"
+        local body="$3"
+        local attachments="${4:-null}"
 
-      # Add log file
-      add_attachment "$LOG_ATTACHMENT_PATH" "text/plain" "vnet_peering.log"
-
-      # Check for failure report and append to email body
-      if [ -f "$FAILURE_R_ATTACHMENT_PATH" ]; then
-        FAILURE_CONTENT=$(cat "$FAILURE_R_ATTACHMENT_PATH")
-        EMAIL_BODY="${EMAIL_BODY}\n\n---\n\nFailure Details:\n$FAILURE_CONTENT"
-      fi
-
-      # Send main report email
-      curl -f -X POST "https://api.sendgrid.com/v3/mail/send" \
-        -H "Authorization: Bearer $SENDGRID_API_KEY" \
-        -H "Content-Type: application/json" \
-        -d '{
-          "personalizations": [
-            {
-              "to": [{"email": "'"$TO_EMAIL"'"}],
-              "subject": "CNGFW - Azure VNets Peering Report"
-            }
-          ],
-          "from": {"email": "'"$FROM_EMAIL"'"},
-          "content": [
-            {
+        # Construct payload using jq for safe JSON generation
+        payload=$(jq -n \
+          --arg to "$to_email" \
+          --arg subject "$subject" \
+          --arg body "$body" \
+          --argjson attachments "$attachments" \
+          '{
+            "personalizations": [{
+              "to": [{"email": $to}],
+              "subject": $subject
+            }],
+            "from": {"email": "'"$FROM_EMAIL"'"},
+            "content": [{
               "type": "text/plain",
-              "value": "'"$(echo -e "$EMAIL_BODY" | sed 's/"/\\"/g')"'"
-            }
-          ],
-          "attachments": ['"${ATTACHMENTS_JSON:-null}"']
-        }'
+              "value": $body
+            }],
+            "attachments": $attachments
+          }')
 
-      # Send failure alert if failure report exists
-      if [ -f "$FAILURE_R_ATTACHMENT_PATH" ]; then
-        curl -f -X POST "https://api.sendgrid.com/v3/mail/send" \
+        # Send email with comprehensive error handling
+        response=$(curl -sS -X POST "https://api.sendgrid.com/v3/mail/send" \
           -H "Authorization: Bearer $SENDGRID_API_KEY" \
           -H "Content-Type: application/json" \
-          -d '{
-            "personalizations": [
-              {
-                "to": [{"email": "'"$FAILURE_TO_EMAIL"'"}],
-                "subject": "CNGFW - Azure VNets Peering FAILURE Report"
-              }
-            ],
-            "from": {"email": "'"$FROM_EMAIL"'"},
-            "content": [
-              {
-                "type": "text/plain",
-                "value": "'"$(echo -e "$FAILURE_CONTENT" | sed 's/"/\\"/g')"'"
-              }
-            ]
-          }'
+          -d "$payload" \
+          -w "%{http_code}" \
+          2>&1)
+
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | head -n -1)
+
+        if [ "$http_code" != "202" ]; then
+          echo "Email sending failed. HTTP Code: $http_code" >&2
+          echo "Response: $body" >&2
+          return 1
+        fi
+      }
+
+      # Prepare attachments JSON
+      ATTACHMENTS_JSON=$(create_attachments_json)
+
+      # Send main report email
+      send_sendgrid_email \
+        "$TO_EMAIL" \
+        "CNGFW - Azure VNets Peering Report" \
+        "$EMAIL_BODY_ESCAPED" \
+        "$ATTACHMENTS_JSON"
+
+      # Check for failure report
+      if [ -f "$FAILURE_R_ATTACHMENT_PATH" ]; then
+        # Read failure content
+        FAILURE_CONTENT=$(cat "$FAILURE_R_ATTACHMENT_PATH")
+
+        # Prepare failure email body
+        FAILURE_EMAIL_BODY="CNGFW - Azure VNets Peering Failure Detected
+
+Job Details:
+- Job URL: ${JOB_URL}
+- Commit: ${JOB_COMMIT}
+- Branch: ${JOB_REF}
+
+Failure Details:
+${FAILURE_CONTENT}"
+
+        # Escape failure email body
+        FAILURE_EMAIL_BODY_ESCAPED=$(escape_json "$FAILURE_EMAIL_BODY")
+
+        # Send failure notification email
+        send_sendgrid_email \
+          "$FAILURE_TO_EMAIL" \
+          "CNGFW - Azure VNets Peering FAILURE Report" \
+          "$FAILURE_EMAIL_BODY_ESCAPED"
       fi
 
       # Clean up virtual environment
       rm -rf pipelines/__py/.venvsec
 
-  # Only run this job on specific conditions
+  # Job execution rules
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: always
