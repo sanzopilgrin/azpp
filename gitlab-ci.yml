@@ -1,223 +1,532 @@
----
-# GitLab CI Configuration for CNGFW VNet Peering Report
+stages:
+  - deploy
 
-# Global variables to reduce repetition
 variables:
-  # Azure and Authentication Variables
-  ARM_TENANT_ID: "9d1d17d8-372b-4b23"
+  # Global variables
+  PYTHON_VERSION: "3.11"
+  VENV_PATH: "pipelines/__py/.venvsec"
+  REPORTS_DIR: "pipelines/__py"
   
-  # Paths for Reports and Logs
-  COMPREHENSIVE_R_ATTACHMENT_PATH: "pipelines/__py/vnet_peering_report.html"
-  FAILURE_R_ATTACHMENT_PATH: "pipelines/__py/vnet_peering_report.html"
-  LOG_ATTACHMENT_PATH: "pipelines/__py/vnet_peering.log"
-  
-  # Email Configuration
+  # Email configuration
   FROM_EMAIL: "gitlab-notif@svc.ptt.com"
   TO_EMAIL: "bakodjinlossi@ptt.com"
   FAILURE_TO_EMAIL: "failure-alerts@ptt.com"
+  
+  # Report file paths
+  COMPREHENSIVE_REPORT_PATH: "pipelines/__py/vnet_peering_report.html"
+  FAILURE_REPORT_PATH: "pipelines/__py/vnet_peering_failure_report.html"
+  LOG_FILE_PATH: "pipelines/__py/vnet_peering.log"
+  
+  # Azure configuration
+  ARM_TENANT_ID: "9d1d17d8-372b-4b23"
+  HUB_SUBSCRIPTION_IDS: "0a1d3787-531c-4354-98cc-c06d32af70,5d7d2ebb-f250-48c2-9553-1776839a73"
 
-# Define stages explicitly
-stages:
-  - deploy
-  - notify
-
-# Job to run VNet Peering Check
 test-cngfw-peering-ops:
-  image:
-    name: docker.ptt.dev/dockerhub/python:latest
-    entrypoint: ['']
-
+  image: docker.ptt.dev/dockerhub/python:${PYTHON_VERSION}
   stage: deploy
   
-  # Securely pass sensitive information
   variables:
+    # Service principal credentials (from CI/CD variables)
     SVC_SECURITY_TERRA_ID: $SVC_SECURITY_TERRA_ID
     SVC_SECURITY_TERRA_SEC: $SVC_SECURITY_TERRA_SEC
     SENDGRID_API_KEY: $SENDGRID_API_KEY
 
-  # Install necessary system dependencies
+  environment:
+    name: SECENG_ENV
+
   before_script:
-    - apt-get update && apt-get install -y curl jq
+    - echo "🚀 Starting CNGFW Azure VNet Peering Operations..."
+    - cd pipelines/__py
+    - echo "📦 Setting up Python virtual environment..."
+    - python3 -m venv ${VENV_PATH}
+    - source ${VENV_PATH}/bin/activate
+    - python -m pip install --upgrade pip
+    - python -m pip install -r requirements.txt
+    - echo "✅ Environment setup completed"
 
-  # Main job script
   script:
+    - echo "🔍 Executing VNet peering analysis..."
     - |
-      # Change to project directory
-      cd pipelines/__py
-
-      # Setup Python virtual environment
-      python3 -m venv .venvsec 
-      source .venvsec/bin/activate 
-      
-      # Upgrade pip and install dependencies
-      python -m pip install --upgrade pip
-      python -m pip install -r requirements.txt
-
-      # Run VNet peering check script
       python main.py \
-        --hub-subscription-ids 0a1d3787-531c-4354-98cc-c06d32af70,5d7d2ebb-f250-48c2-9553-1776839a73 \
+        --hub-subscription-ids ${HUB_SUBSCRIPTION_IDS} \
         --auth-method service_principal \
-        --tenant-id "$ARM_TENANT_ID" \
-        --client-id "$SVC_SECURITY_TERRA_ID" \
-        --client-secret "$SVC_SECURITY_TERRA_SEC" \
-        --skip-cleanup
+        --tenant-id "${ARM_TENANT_ID}" \
+        --client-id ${SVC_SECURITY_TERRA_ID} \
+        --client-secret ${SVC_SECURITY_TERRA_SEC} \
+        --skip-cleanup \
+        --output-format html \
+        --log-level INFO
+    - echo "✅ VNet peering analysis completed"
 
-  # Preserve artifacts for debugging and reporting
   artifacts:
+    name: "cngfw-peering-reports-${CI_PIPELINE_ID}"
     paths:
-      - pipelines/__py/
-    expire_in: 1 week
+      - pipelines/__py/*.html
+      - pipelines/__py/*.log
+      - pipelines/__py/*.json
+    expire_in: 30 days
+    when: always
 
-  # Notification and cleanup script
   after_script:
+    - echo "📧 Preparing email notifications..."
+    - cd pipelines/__py
+    # Create the email script directory if it doesn't exist
+    - mkdir -p ../../scripts
+    # Create the email notification script inline
     - |
-      # Ensure script continues even if some steps fail
-      set -e
+      cat > ../../scripts/send_email_notifications.sh << 'SCRIPT_EOF'
+      #!/bin/bash
 
-      # Function to escape JSON strings using jq
-      escape_json() {
-        printf '%s' "$1" | jq -R -s '.'
+      # Email notification script for CNGFW Azure VNet Peering Reports
+      # This script handles the email sending logic with proper formatting and error handling
+
+      set -euo pipefail
+
+      # Configuration
+      TEMP_DIR="/tmp/email_notifications_$$"
+
+      # Create temporary directory for email processing
+      mkdir -p "$TEMP_DIR"
+
+      # Cleanup function
+      cleanup() {
+          echo "🧹 Cleaning up temporary files..."
+          rm -rf "$TEMP_DIR"
+      }
+      trap cleanup EXIT
+
+      # Logging function
+      log() {
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
       }
 
-      # Capture job details
-      JOB_URL="${CI_JOB_URL}"
-      JOB_REF="${CI_COMMIT_REF_NAME}"
-      JOB_COMMIT="${CI_COMMIT_SHORT_SHA}"
+      # Error handling function
+      handle_error() {
+          local error_message="$1"
+          log "❌ ERROR: $error_message"
+          
+          # Send error notification email
+          send_error_notification "$error_message"
+          exit 1
+      }
 
-      # Prepare base email body
-      BASE_EMAIL_BODY="Please find attached the detailed CNGFW - Azure VNets Peerings Report.
+      # Function to validate required environment variables
+      validate_environment() {
+          log "🔍 Validating environment variables..."
+          
+          local required_vars=(
+              "SENDGRID_API_KEY"
+              "FROM_EMAIL"
+              "TO_EMAIL"
+              "FAILURE_TO_EMAIL"
+              "CI_PIPELINE_ID"
+              "CI_PROJECT_NAME"
+              "CI_PIPELINE_URL"
+          )
+          
+          for var in "${required_vars[@]}"; do
+              if [[ -z "${!var:-}" ]]; then
+                  handle_error "Required environment variable $var is not set"
+              fi
+          done
+          
+          log "✅ Environment validation completed"
+      }
 
-Job Details:
-- Job URL: ${JOB_URL}
-- Commit: ${JOB_COMMIT}
-- Branch: ${JOB_REF}"
-
-      # Escape the base email body
-      EMAIL_BODY_ESCAPED=$(escape_json "$BASE_EMAIL_BODY")
-
-      # Function to create attachments JSON
-      create_attachments_json() {
-        local attachments_json="["
-        local first_attachment=true
-
-        # Check and add comprehensive report
-        if [ -f "$COMPREHENSIVE_R_ATTACHMENT_PATH" ]; then
-          local comp_content=$(base64 -w 0 "$COMPREHENSIVE_R_ATTACHMENT_PATH")
-          attachments_json+="{
-            \"content\": \"$comp_content\",
-            \"type\": \"text/html\",
-            \"filename\": \"vnet_peering_report.html\",
-            \"disposition\": \"attachment\"
-          }"
-          first_attachment=false
-        fi
-
-        # Check and add log file
-        if [ -f "$LOG_ATTACHMENT_PATH" ]; then
-          local log_content=$(base64 -w 0 "$LOG_ATTACHMENT_PATH")
-          if [ "$first_attachment" = false ]; then
-            attachments_json+=","
+      # Function to check file existence and readability
+      check_file() {
+          local file_path="$1"
+          if [[ -f "$file_path" && -r "$file_path" ]]; then
+              return 0
+          else
+              return 1
           fi
-          attachments_json+="{
-            \"content\": \"$log_content\",
-            \"type\": \"text/plain\",
-            \"filename\": \"vnet_peering.log\",
-            \"disposition\": \"attachment\"
-          }"
-        fi
-
-        attachments_json+="]"
-        echo "$attachments_json"
       }
 
-      # Function to send email via SendGrid
-      send_sendgrid_email() {
-        local to_email="$1"
-        local subject="$2"
-        local body="$3"
-        local attachments="${4:-null}"
-
-        # Construct payload using jq for safe JSON generation
-        payload=$(jq -n \
-          --arg to "$to_email" \
-          --arg subject "$subject" \
-          --arg body "$body" \
-          --argjson attachments "$attachments" \
-          '{
-            "personalizations": [{
-              "to": [{"email": $to}],
-              "subject": $subject
-            }],
-            "from": {"email": "'"$FROM_EMAIL"'"},
-            "content": [{
-              "type": "text/plain",
-              "value": $body
-            }],
-            "attachments": $attachments
-          }')
-
-        # Send email with comprehensive error handling
-        response=$(curl -sS -X POST "https://api.sendgrid.com/v3/mail/send" \
-          -H "Authorization: Bearer $SENDGRID_API_KEY" \
-          -H "Content-Type: application/json" \
-          -d "$payload" \
-          -w "%{http_code}" \
-          2>&1)
-
-        http_code=$(echo "$response" | tail -n1)
-        body=$(echo "$response" | head -n -1)
-
-        if [ "$http_code" != "202" ]; then
-          echo "Email sending failed. HTTP Code: $http_code" >&2
-          echo "Response: $body" >&2
-          return 1
-        fi
+      # Function to encode file to base64
+      encode_file_base64() {
+          local file_path="$1"
+          if check_file "$file_path"; then
+              base64 -w 0 "$file_path"
+          else
+              echo ""
+          fi
       }
 
-      # Prepare attachments JSON
-      ATTACHMENTS_JSON=$(create_attachments_json)
+      # Function to get file size in human readable format
+      get_file_size() {
+          local file_path="$1"
+          if check_file "$file_path"; then
+              du -h "$file_path" | cut -f1
+          else
+              echo "0B"
+          fi
+      }
 
-      # Send main report email
-      send_sendgrid_email \
-        "$TO_EMAIL" \
-        "CNGFW - Azure VNets Peering Report" \
-        "$EMAIL_BODY_ESCAPED" \
-        "$ATTACHMENTS_JSON"
+      # Function to create attachment JSON
+      create_attachment_json() {
+          local file_path="$1"
+          local content_type="$2"
+          local filename="$3"
+          
+          if ! check_file "$file_path"; then
+              echo ""
+              return
+          fi
+          
+          local content
+          content=$(encode_file_base64 "$file_path")
+          if [[ -z "$content" ]]; then
+              echo ""
+              return
+          fi
+          
+          local size
+          size=$(get_file_size "$file_path")
+          
+          # Create JSON manually to avoid dependencies
+          cat << JSON_END
+      {
+        "content": "$content",
+        "type": "$content_type",
+        "filename": "$filename",
+        "disposition": "attachment"
+      }
+      JSON_END
+      }
 
-      # Check for failure report
-      if [ -f "$FAILURE_R_ATTACHMENT_PATH" ]; then
-        # Read failure content
-        FAILURE_CONTENT=$(cat "$FAILURE_R_ATTACHMENT_PATH")
+      # Function to generate comprehensive email body
+      generate_comprehensive_email_body() {
+          local pipeline_status="$1"
+          local report_summary="$2"
+          
+          cat << 'EMAIL_BODY_END'
+      📊 CNGFW - Azure VNet Peering Report
 
-        # Prepare failure email body
-        FAILURE_EMAIL_BODY="CNGFW - Azure VNets Peering Failure Detected
+      Dear Team,
 
-Job Details:
-- Job URL: ${JOB_URL}
-- Commit: ${JOB_COMMIT}
-- Branch: ${JOB_REF}
+      This email contains the automated report for Cloud Next Generation Firewall (CNGFW) Azure Virtual Network peering operations.
 
-Failure Details:
-${FAILURE_CONTENT}"
+      ═══════════════════════════════════════════════════════════
+      📋 EXECUTION SUMMARY
+      ═══════════════════════════════════════════════════════════
 
-        # Escape failure email body
-        FAILURE_EMAIL_BODY_ESCAPED=$(escape_json "$FAILURE_EMAIL_BODY")
+      Pipeline ID: ${CI_PIPELINE_ID}
+      Project: ${CI_PROJECT_NAME}
+      Execution Date: $(date '+%Y-%m-%d %H:%M:%S UTC')
+      Status: ${pipeline_status}
+      Pipeline URL: ${CI_PIPELINE_URL}
 
-        # Send failure notification email
-        send_sendgrid_email \
-          "$FAILURE_TO_EMAIL" \
-          "CNGFW - Azure VNets Peering FAILURE Report" \
-          "$FAILURE_EMAIL_BODY_ESCAPED"
-      fi
+      ═══════════════════════════════════════════════════════════
+      📈 REPORT DETAILS
+      ═══════════════════════════════════════════════════════════
 
-      # Clean up virtual environment
-      rm -rf pipelines/__py/.venvsec
+      ${report_summary}
 
-  # Job execution rules
+      ═══════════════════════════════════════════════════════════
+      📎 ATTACHMENTS
+      ═══════════════════════════════════════════════════════════
+
+      This email includes the following attachments:
+      • HTML Report: Comprehensive visual report with charts and detailed analysis
+      • Log File: Detailed execution logs for troubleshooting and audit purposes
+
+      ═══════════════════════════════════════════════════════════
+      🔍 NEXT STEPS
+      ═══════════════════════════════════════════════════════════
+
+      1. Review the attached HTML report for detailed peering status
+      2. Check the log file for any warnings or informational messages
+      3. Address any issues highlighted in the report
+      4. Monitor the next scheduled execution
+
+      ═══════════════════════════════════════════════════════════
+
+      For technical support or questions regarding this report, please contact the Security Engineering team.
+
+      Best regards,
+      GitLab CI/CD Automation System
+      EMAIL_BODY_END
+      }
+
+      # Function to generate failure email body
+      generate_failure_email_body() {
+          local error_details="$1"
+          
+          cat << 'FAILURE_BODY_END'
+      🚨 CNGFW - Azure VNet Peering FAILURE ALERT
+
+      URGENT: The CNGFW Azure VNet Peering operation has encountered critical issues.
+
+      ═══════════════════════════════════════════════════════════
+      ❌ FAILURE DETAILS
+      ═══════════════════════════════════════════════════════════
+
+      Pipeline ID: ${CI_PIPELINE_ID}
+      Project: ${CI_PROJECT_NAME}
+      Failure Time: $(date '+%Y-%m-%d %H:%M:%S UTC')
+      Pipeline URL: ${CI_PIPELINE_URL}
+
+      Error Details:
+      ${error_details}
+
+      ═══════════════════════════════════════════════════════════
+      🔧 IMMEDIATE ACTIONS REQUIRED
+      ═══════════════════════════════════════════════════════════
+
+      1. Investigate the root cause of the failure
+      2. Check Azure service health and connectivity
+      3. Verify service principal permissions and credentials
+      4. Review the attached logs for detailed error information
+      5. Manually trigger the pipeline after resolving issues
+
+      ═══════════════════════════════════════════════════════════
+      📞 ESCALATION
+      ═══════════════════════════════════════════════════════════
+
+      If this issue persists or requires immediate attention:
+      • Contact: Security Engineering Team (On-Call)
+      • Escalation: Infrastructure Team Lead
+      • Priority: HIGH
+
+      ═══════════════════════════════════════════════════════════
+
+      This is an automated alert. Please do not reply to this email.
+      FAILURE_BODY_END
+      }
+
+      # Function to escape JSON string
+      escape_json_string() {
+          local string="$1"
+          # Escape quotes and newlines for JSON
+          echo "$string" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g'
+      }
+
+      # Function to send email using SendGrid API
+      send_email() {
+          local to_email="$1"
+          local subject="$2"
+          local email_body="$3"
+          local attachments_json="$4"
+          
+          log "📧 Sending email to: $to_email"
+          log "📧 Subject: $subject"
+          
+          # Escape email body for JSON
+          local escaped_body
+          escaped_body=$(escape_json_string "$email_body")
+          
+          # Create email payload - build JSON manually to avoid dependencies
+          local email_payload
+          email_payload=$(cat << JSON_PAYLOAD_END
+      {
+          "personalizations": [
+              {
+                  "to": [{"email": "$to_email"}],
+                  "subject": "$subject"
+              }
+          ],
+          "from": {"email": "$FROM_EMAIL"},
+          "content": [
+              {
+                  "type": "text/plain",
+                  "value": "$escaped_body"
+              }
+          ],
+          "attachments": $attachments_json
+      }
+      JSON_PAYLOAD_END
+      )
+          
+          # Save payload to temp file for debugging
+          echo "$email_payload" > "$TEMP_DIR/email_payload.json"
+          
+          # Send email via SendGrid API
+          local response
+          response=$(curl -s -w "\n%{http_code}" -X POST "https://api.sendgrid.com/v3/mail/send" \
+              -H "Authorization: Bearer $SENDGRID_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "$email_payload")
+          
+          local http_code
+          http_code=$(echo "$response" | tail -n1)
+          local response_body
+          response_body=$(echo "$response" | head -n -1)
+          
+          if [[ "$http_code" -eq 202 ]]; then
+              log "✅ Email sent successfully to $to_email"
+              return 0
+          else
+              log "❌ Failed to send email to $to_email (HTTP: $http_code)"
+              log "Response: $response_body"
+              return 1
+          fi
+      }
+
+      # Function to send error notification
+      send_error_notification() {
+          local error_message="$1"
+          
+          local error_body
+          error_body=$(cat << ERROR_EMAIL_END
+      🚨 CRITICAL: Email Notification System Failure
+
+      The CNGFW Azure VNet Peering pipeline completed, but the email notification system encountered an error.
+
+      Error: $error_message
+
+      Pipeline ID: ${CI_PIPELINE_ID:-"Unknown"}
+      Time: $(date '+%Y-%m-%d %H:%M:%S UTC')
+
+      Please check the pipeline logs and manual review the reports in the artifacts.
+
+      This requires immediate attention from the DevOps team.
+      ERROR_EMAIL_END
+      )
+          
+          local escaped_error_body
+          escaped_error_body=$(escape_json_string "$error_body")
+          
+          # Try to send basic error notification without attachments
+          curl -s -X POST "https://api.sendgrid.com/v3/mail/send" \
+              -H "Authorization: Bearer $SENDGRID_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{
+                  \"personalizations\": [
+                      {
+                          \"to\": [{\"email\": \"$FAILURE_TO_EMAIL\"}],
+                          \"subject\": \"CRITICAL: CNGFW Pipeline Email Notification Failure\"
+                      }
+                  ],
+                  \"from\": {\"email\": \"$FROM_EMAIL\"},
+                  \"content\": [
+                      {
+                          \"type\": \"text/plain\",
+                          \"value\": \"$escaped_error_body\"
+                      }
+                  ]
+              }" || true
+      }
+
+      # Main execution function
+      main() {
+          log "🚀 Starting email notification process..."
+          
+          # Validate environment
+          validate_environment
+          
+          # Define file paths
+          local comprehensive_report="${COMPREHENSIVE_REPORT_PATH:-pipelines/__py/vnet_peering_report.html}"
+          local failure_report="${FAILURE_REPORT_PATH:-pipelines/__py/vnet_peering_failure_report.html}"
+          local log_file="${LOG_FILE_PATH:-pipelines/__py/vnet_peering.log}"
+          
+          # Initialize attachment arrays
+          local attachments=()
+          
+          # Process comprehensive report attachment
+          if check_file "$comprehensive_report"; then
+              log "📎 Processing comprehensive report attachment..."
+              local report_attachment
+              report_attachment=$(create_attachment_json "$comprehensive_report" "text/html" "vnet_peering_report.html")
+              if [[ -n "$report_attachment" ]]; then
+                  attachments+=("$report_attachment")
+                  log "✅ Comprehensive report attachment prepared ($(get_file_size "$comprehensive_report"))"
+              fi
+          else
+              log "⚠️  Comprehensive report not found: $comprehensive_report"
+          fi
+          
+          # Process log file attachment
+          if check_file "$log_file"; then
+              log "📎 Processing log file attachment..."
+              local log_attachment
+              log_attachment=$(create_attachment_json "$log_file" "text/plain" "vnet_peering.log")
+              if [[ -n "$log_attachment" ]]; then
+                  attachments+=("$log_attachment")
+                  log "✅ Log file attachment prepared ($(get_file_size "$log_file"))"
+              fi
+          else
+              log "⚠️  Log file not found: $log_file"
+          fi
+          
+          # Create attachments JSON array
+          local attachments_json="[]"
+          if [[ ${#attachments[@]} -gt 0 ]]; then
+              # Manually build JSON array
+              attachments_json="["
+              for i in "${!attachments[@]}"; do
+                  if [[ $i -gt 0 ]]; then
+                      attachments_json="$attachments_json,"
+                  fi
+                  attachments_json="$attachments_json${attachments[$i]}"
+              done
+              attachments_json="$attachments_json]"
+          fi
+          
+          # Determine pipeline status and generate report summary
+          local pipeline_status="SUCCESS"
+          local report_summary="The VNet peering analysis completed successfully. Please review the attached reports for detailed information."
+          
+          if check_file "$failure_report"; then
+              pipeline_status="PARTIAL SUCCESS WITH WARNINGS"
+              report_summary="The VNet peering analysis completed with some warnings or issues. Please review the failure report for details."
+          fi
+          
+          # Generate and send comprehensive email
+          local comprehensive_body
+          comprehensive_body=$(generate_comprehensive_email_body "$pipeline_status" "$report_summary")
+          
+          if ! send_email "$TO_EMAIL" "CNGFW - Azure VNet Peering Report" "$comprehensive_body" "$attachments_json"; then
+              handle_error "Failed to send comprehensive report email"
+          fi
+          
+          # Send failure notification if failure report exists
+          if check_file "$failure_report"; then
+              log "⚠️  Failure report detected, sending failure notification..."
+              
+              local failure_content
+              if failure_content=$(cat "$failure_report" 2>/dev/null); then
+                  local failure_body
+                  failure_body=$(generate_failure_email_body "$failure_content")
+                  
+                  if ! send_email "$FAILURE_TO_EMAIL" "🚨 CNGFW - Azure VNet Peering FAILURE ALERT" "$failure_body" "[]"; then
+                      log "❌ Failed to send failure notification email"
+                  else
+                      log "✅ Failure notification sent successfully"
+                  fi
+              else
+                  log "❌ Could not read failure report content"
+              fi
+          fi
+          
+          log "✅ Email notification process completed successfully"
+      }
+
+      # Execute main function
+      main "$@"
+      SCRIPT_EOF
+    # Make email script executable
+    - chmod +x ../../scripts/send_email_notifications.sh
+    # Execute email notification script
+    - ../../scripts/send_email_notifications.sh
+    # Cleanup
+    - echo "🧹 Cleaning up temporary files..."
+    - rm -rf ${VENV_PATH}
+    - echo "✅ Pipeline execution completed"
+
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+  timeout: 30m
+
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: always
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: always
-    - when: manual
-      allow_failure: true
+      when: manual
+      allow_failure: false
