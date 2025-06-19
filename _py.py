@@ -541,10 +541,7 @@ class VNetPeeringManager:
         """Remove failure log file if no failures occurred."""
         try:
             # Check if there were any critical failures
-            has_failures = (
-                self.report_data.get("critical_failures") or 
-                any("Deletion Failed" in str(record.msg) for record in self.failure_logger.handlers[0].buffer if hasattr(self.failure_logger.handlers[0], 'buffer'))
-            )
+            has_failures = bool(self.report_data.get("critical_failures"))
             
             if not has_failures:
                 # Close the handler and remove the file
@@ -552,12 +549,22 @@ class VNetPeeringManager:
                 self.failure_logger.removeHandler(self.failure_handler)
                 
                 if os.path.exists(self.failure_log_path):
-                    os.remove(self.failure_log_path)
-                    self.logger.info(f"🧹 Removed empty failure log file: {self.failure_log_path}")
+                    # Check if file only contains the header
+                    with open(self.failure_log_path, 'r') as f:
+                        content = f.read()
+                        # If only header exists (one line), safe to delete
+                        if content.count('\n') <= 2:  # Header + separator
+                            os.remove(self.failure_log_path)
+                            self.logger.info(f"🧹 Removed empty failure log file: {self.failure_log_path}")
+                        else:
+                            self.logger.warning(f"⚠️  Failure log contains entries: {self.failure_log_path}")
             else:
                 self.logger.warning(f"⚠️  Critical failures logged to: {self.failure_log_path}")
+                
         except Exception as e:
             self.logger.debug(f"Could not cleanup failure log: {e}")
+    
+    def cleanup_orphan_peerings(self, valid_regions: Set[str], dry_run: bool = False) -> None:    
         """Clean up orphaned peerings that point to non-existent VNets with parallel processing."""
         self.logger.info(f"\n🧹 Cleaning up orphaned peerings {'(DRY RUN)' if dry_run else ''}")
         
