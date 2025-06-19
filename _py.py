@@ -137,10 +137,30 @@ class VNetPeeringManager:
         logging.basicConfig(level=logging.INFO, format=log_format)
         self.logger = logging.getLogger(__name__)
         
-        # Also create a file handler
-        file_handler = logging.FileHandler(f'vnet_peering_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+        # Create timestamp for log files
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Main log file handler
+        file_handler = logging.FileHandler(f'vnet_peering_{timestamp}.log')
         file_handler.setFormatter(logging.Formatter(log_format))
         self.logger.addHandler(file_handler)
+        
+        # Create a separate logger for critical failures
+        self.failure_logger = logging.getLogger(f"{__name__}.failures")
+        self.failure_logger.setLevel(logging.ERROR)
+        
+        # Failed peerings log file handler
+        failure_handler = logging.FileHandler(f'vnet_peering_failures_{timestamp}.log')
+        failure_format = logging.Formatter(
+            '%(asctime)s - CRITICAL FAILURE - %(message)s\n' + '-' * 80
+        )
+        failure_handler.setFormatter(failure_format)
+        self.failure_logger.addHandler(failure_handler)
+        
+        # Write header to failure log
+        self.failure_logger.error(
+            f"Failed Peerings Log - Session Started at {datetime.utcnow().isoformat()}"
+        )
     
     def _load_config(self, config_file: str) -> Dict[str, Any]:
         """Load configuration from YAML file."""
@@ -380,6 +400,32 @@ class VNetPeeringManager:
                     time.sleep(retry_delay * (attempt + 1))
                 else:
                     self.logger.error(f"{Fore.RED}❌ Failed to create peering '{peering_name}' after {max_retries} attempts: {e}{Style.RESET_ALL}")
+                    
+                    # Log to critical failures file with detailed context
+                    self.failure_logger.error(
+                        f"Peering Creation Failed After {max_retries} Attempts\n"
+                        f"Peering Name: {peering_name}\n"
+                        f"Source VNet: {source_vnet.name} (ID: {source_vnet.id})\n"
+                        f"Target VNet: {target_vnet.name} (ID: {target_vnet.id})\n"
+                        f"Resource Group: {rg}\n"
+                        f"Subscription: {sub_id}\n"
+                        f"Configuration: {config.to_dict()}\n"
+                        f"Final Error: {type(e).__name__}: {str(e)}\n"
+                        f"Timestamp: {datetime.utcnow().isoformat()}"
+                    )
+                    
+                    # Also add to report data for tracking
+                    if "critical_failures" not in self.report_data:
+                        self.report_data["critical_failures"] = []
+                    
+                    self.report_data["critical_failures"].append({
+                        "peering_name": peering_name,
+                        "source_vnet": source_vnet.name,
+                        "target_vnet": target_vnet.name,
+                        "error": str(e),
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                    
                     return False
         
         return False
@@ -432,14 +478,17 @@ class VNetPeeringManager:
         self.logger.info(f"🔧 {'Repairing' if (existing_hub_to_spoke or existing_spoke_to_hub) else 'Creating'} "
                         f"peerings between {hub_vnet.name} and {spoke_vnet.name}")
         
-        # Delete unhealthy peerings
-        if existing_hub_to_spoke and not hub_healthy:
-            self.logger.info(f"🧹 Deleting unhealthy hub->spoke peering")
-            self.delete_peering(hub_vnet, hub_to_spoke_name)
-        
-        if existing_spoke_to_hub and not spoke_healthy:
-            self.logger.info(f"🧹 Deleting unhealthy spoke->hub peering")
-            self.delete_peering(spoke_vnet, spoke_to_hub_name)
+        # Delete BOTH peerings if EITHER is unhealthy to ensure clean state
+        if (existing_hub_to_spoke or existing_spoke_to_hub) and (not hub_healthy or not spoke_healthy):
+            self.logger.info(f"🧹 One or both peerings are unhealthy - deleting both sides for clean recreation")
+            
+            if existing_hub_to_spoke:
+                self.logger.info(f"   Deleting hub->spoke peering (was {'healthy' if hub_healthy else 'unhealthy'})")
+                self.delete_peering(hub_vnet, hub_to_spoke_name)
+            
+            if existing_spoke_to_hub:
+                self.logger.info(f"   Deleting spoke->hub peering (was {'healthy' if spoke_healthy else 'unhealthy'})")
+                self.delete_peering(spoke_vnet, spoke_to_hub_name)
         
         # Create new peerings
         hub_success = self.create_peering(hub_vnet, spoke_vnet, hub_to_spoke_name, config)
@@ -853,6 +902,29 @@ class VNetPeeringManager:
             html += html_table(orphan_rows, ["VNet", "Peering Name", "Remote VNet ID"])
         else:
             html += "<p class='no-data'>No orphan peerings were deleted.</p>"
+        
+        # Critical failures section
+        if self.report_data.get("critical_failures"):
+            html += """<h2>🚨 Critical Failures (Max Retries Exceeded)</h2>
+                      <div class='summary' style='background: #ffe6e6; border-left: 5px solid #d13438;'>
+                      <strong>⚠️ These peerings failed after maximum retry attempts and require manual investigation.</strong><br>
+                      Check the detailed failure log: vnet_peering_failures_*.log
+                      </div>"""
+            
+            critical_rows = [
+                (
+                    entry["peering_name"],
+                    entry["source_vnet"],
+                    entry["target_vnet"],
+                    f"<span class='status-badge status-failed'>{entry['error'][:100]}...</span>",
+                    entry["timestamp"]
+                )
+                for entry in self.report_data["critical_failures"]
+            ]
+            html += html_table(
+                critical_rows,
+                ["Peering Name", "Source VNet", "Target VNet", "Error", "Timestamp"]
+            )
         
         # Performance metrics
         html += f"""
