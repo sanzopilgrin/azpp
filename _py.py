@@ -150,12 +150,16 @@ class VNetPeeringManager:
         self.failure_logger.setLevel(logging.ERROR)
         
         # Failed peerings log file handler
-        failure_handler = logging.FileHandler(f'vnet_peering_failures_{timestamp}.log')
+        self.failure_log_path = f'vnet_peering_failures_{timestamp}.log'
+        failure_handler = logging.FileHandler(self.failure_log_path)
         failure_format = logging.Formatter(
             '%(asctime)s - CRITICAL FAILURE - %(message)s\n' + '-' * 80
         )
         failure_handler.setFormatter(failure_format)
         self.failure_logger.addHandler(failure_handler)
+        
+        # Store the handler for potential cleanup
+        self.failure_handler = failure_handler
         
         # Write header to failure log
         self.failure_logger.error(
@@ -533,7 +537,27 @@ class VNetPeeringManager:
         self.report_data["all_peerings"].append(result)
         return result
     
-    def cleanup_orphan_peerings(self, valid_regions: Set[str], dry_run: bool = False) -> None:
+    def cleanup_failure_log(self):
+        """Remove failure log file if no failures occurred."""
+        try:
+            # Check if there were any critical failures
+            has_failures = (
+                self.report_data.get("critical_failures") or 
+                any("Deletion Failed" in str(record.msg) for record in self.failure_logger.handlers[0].buffer if hasattr(self.failure_logger.handlers[0], 'buffer'))
+            )
+            
+            if not has_failures:
+                # Close the handler and remove the file
+                self.failure_handler.close()
+                self.failure_logger.removeHandler(self.failure_handler)
+                
+                if os.path.exists(self.failure_log_path):
+                    os.remove(self.failure_log_path)
+                    self.logger.info(f"🧹 Removed empty failure log file: {self.failure_log_path}")
+            else:
+                self.logger.warning(f"⚠️  Critical failures logged to: {self.failure_log_path}")
+        except Exception as e:
+            self.logger.debug(f"Could not cleanup failure log: {e}")
         """Clean up orphaned peerings that point to non-existent VNets with parallel processing."""
         self.logger.info(f"\n🧹 Cleaning up orphaned peerings {'(DRY RUN)' if dry_run else ''}")
         
@@ -1188,6 +1212,9 @@ Examples:
     if args.export_json:
         json_filename = f"vnet_peering_report_{report_timestamp}.json"
         manager.export_json_report(json_filename)
+    
+    # Cleanup failure log if no failures occurred
+    manager.cleanup_failure_log()
     
     print(f"\n{Fore.GREEN}🎉 Peering management completed!{Style.RESET_ALL}")
     print(f"📊 Summary:")
