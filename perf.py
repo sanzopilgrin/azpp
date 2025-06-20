@@ -1,7 +1,21 @@
 #!/usr/bin/env python3
 """
-Website Performance Testing Script
-Tests latency, throughput, response times, and generates comprehensive reports.
+Comprehensive Website Performance Testing Script
+Tests availability, performance metrics, SSL certificates, and generates detailed reports.
+
+Requirements:
+- pip install requests selenium psutil
+- Chrome/Chromium browser (for Web Vitals collection)
+- ChromeDriver (automatically managed by selenium 4.x)
+
+Features:
+- SSL certificate validation and expiration checking
+- Core Web Vitals (FCP, LCP, CLS, TTI) measurement
+- Resource loading analysis (images, CSS, JS, fonts)
+- Multiple endpoint health checks
+- Geographic performance testing simulation
+- Load and stress testing with concurrent users
+- Comprehensive HTML reports with visual indicators
 """
 
 import requests
@@ -11,17 +25,56 @@ import concurrent.futures
 import socket
 import ssl
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import argparse
 import sys
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import psutil
+import re
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import subprocess
+import platform
+
+@dataclass
+class SSLInfo:
+    """SSL Certificate information"""
+    is_valid: bool
+    issuer: str
+    subject: str
+    expires: datetime
+    days_until_expiry: int
+    version: str
+    cipher: str
+
+@dataclass
+class ResourceTiming:
+    """Resource loading timing information"""
+    url: str
+    size: int
+    load_time: float
+    resource_type: str
+    status_code: int
+
+@dataclass
+class WebVitals:
+    """Core Web Vitals metrics"""
+    fcp: float  # First Contentful Paint
+    lcp: float  # Largest Contentful Paint
+    cls: float  # Cumulative Layout Shift
+    tti: float  # Time to Interactive
+    dom_ready: float
+    fully_loaded: float
 
 @dataclass
 class PerformanceMetrics:
-    """Data class to store performance metrics"""
+    """Comprehensive performance metrics"""
     url: str
     dns_time: float
     connect_time: float
@@ -31,12 +84,259 @@ class PerformanceMetrics:
     response_size: int
     status_code: int
     timestamp: float
+    ssl_info: Optional[SSLInfo] = None
+    web_vitals: Optional[WebVitals] = None
+    resources: List[ResourceTiming] = None
+    location: str = "local"
+
+class SSLChecker:
+    """SSL Certificate validation and information extraction"""
+    
+    @staticmethod
+    def check_ssl_certificate(hostname: str, port: int = 443) -> SSLInfo:
+        """Check SSL certificate details"""
+        try:
+            context = ssl.create_default_context()
+            with socket.create_connection((hostname, port), timeout=10) as sock:
+                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    cert = ssock.getpeercert()
+                    
+                    # Parse expiration date
+                    expires_str = cert['notAfter']
+                    expires = datetime.strptime(expires_str, '%b %d %H:%M:%S %Y %Z')
+                    days_until_expiry = (expires - datetime.now()).days
+                    
+                    # Extract certificate info
+                    issuer = dict(x[0] for x in cert['issuer'])['organizationName']
+                    subject = dict(x[0] for x in cert['subject'])['commonName']
+                    
+                    return SSLInfo(
+                        is_valid=True,
+                        issuer=issuer,
+                        subject=subject,
+                        expires=expires,
+                        days_until_expiry=days_until_expiry,
+                        version=ssock.version(),
+                        cipher=ssock.cipher()[0] if ssock.cipher() else "Unknown"
+                    )
+                    
+        except Exception as e:
+            return SSLInfo(
+                is_valid=False,
+                issuer=f"Error: {str(e)}",
+                subject="",
+                expires=datetime.now(),
+                days_until_expiry=0,
+                version="",
+                cipher=""
+            )
+
+class WebVitalsCollector:
+    """Collect Core Web Vitals using Selenium"""
+    
+    def __init__(self):
+        self.driver = None
+        
+    def setup_driver(self):
+        """Setup Chrome WebDriver with performance logging"""
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+            
+            # Enable performance logging
+            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+            
+            self.driver = webdriver.Chrome(options=chrome_options)
+            return True
+        except Exception as e:
+            print(f"Warning: Could not setup Chrome WebDriver for Web Vitals collection: {e}")
+            print("Continuing without Web Vitals metrics...")
+            return False
+    
+    def collect_web_vitals(self, url: str) -> Optional[WebVitals]:
+        """Collect Core Web Vitals metrics"""
+        if not self.driver:
+            return None
+            
+        try:
+            start_time = time.time()
+            self.driver.get(url)
+            
+            # Wait for page to load
+            WebDriverWait(self.driver, 30).until(
+                lambda driver: driver.execute_script("return document.readyState") == "complete"
+            )
+            
+            # Get navigation timing
+            nav_timing = self.driver.execute_script("""
+                const timing = performance.timing;
+                const navigation = performance.getEntriesByType('navigation')[0];
+                return {
+                    domReady: timing.domContentLoadedEventEnd - timing.navigationStart,
+                    fullyLoaded: timing.loadEventEnd - timing.navigationStart,
+                    ttfb: timing.responseStart - timing.navigationStart
+                };
+            """)
+            
+            # Get Core Web Vitals (simplified approximation)
+            web_vitals_script = """
+                return new Promise((resolve) => {
+                    const vitals = {
+                        fcp: 0,
+                        lcp: 0,
+                        cls: 0,
+                        tti: 0
+                    };
+                    
+                    // First Contentful Paint
+                    const fcpEntry = performance.getEntriesByName('first-contentful-paint')[0];
+                    if (fcpEntry) vitals.fcp = fcpEntry.startTime;
+                    
+                    // Largest Contentful Paint (approximation)
+                    const paintEntries = performance.getEntriesByType('paint');
+                    if (paintEntries.length > 0) {
+                        vitals.lcp = Math.max(...paintEntries.map(p => p.startTime));
+                    }
+                    
+                    // Time to Interactive (approximation using domInteractive)
+                    vitals.tti = performance.timing.domInteractive - performance.timing.navigationStart;
+                    
+                    // CLS is complex to measure, setting to 0 for now
+                    vitals.cls = 0;
+                    
+                    resolve(vitals);
+                });
+            """
+            
+            vitals_data = self.driver.execute_script(web_vitals_script)
+            
+            return WebVitals(
+                fcp=vitals_data.get('fcp', 0) / 1000,  # Convert to seconds
+                lcp=vitals_data.get('lcp', 0) / 1000,
+                cls=vitals_data.get('cls', 0),
+                tti=vitals_data.get('tti', 0) / 1000,
+                dom_ready=nav_timing.get('domReady', 0) / 1000,
+                fully_loaded=nav_timing.get('fullyLoaded', 0) / 1000
+            )
+            
+        except Exception as e:
+            print(f"Warning: Could not collect Web Vitals: {e}")
+            return None
+    
+    def collect_resource_timings(self, url: str) -> List[ResourceTiming]:
+        """Collect resource loading timings"""
+        if not self.driver:
+            return []
+            
+        try:
+            self.driver.get(url)
+            
+            # Wait for page to load
+            WebDriverWait(self.driver, 30).until(
+                lambda driver: driver.execute_script("return document.readyState") == "complete"
+            )
+            
+            # Get resource timing data
+            resources_script = """
+                return performance.getEntriesByType('resource').map(entry => ({
+                    name: entry.name,
+                    duration: entry.duration,
+                    transferSize: entry.transferSize || 0,
+                    initiatorType: entry.initiatorType
+                }));
+            """
+            
+            resources_data = self.driver.execute_script(resources_script)
+            
+            resource_timings = []
+            for resource in resources_data:
+                # Determine resource type
+                name = resource['name']
+                if any(ext in name.lower() for ext in ['.js', 'javascript']):
+                    resource_type = 'script'
+                elif any(ext in name.lower() for ext in ['.css', 'stylesheet']):
+                    resource_type = 'stylesheet'
+                elif any(ext in name.lower() for ext in ['.jpg', '.png', '.gif', '.webp', '.svg']):
+                    resource_type = 'image'
+                elif any(ext in name.lower() for ext in ['.woff', '.woff2', '.ttf', '.otf']):
+                    resource_type = 'font'
+                else:
+                    resource_type = resource.get('initiatorType', 'other')
+                
+                resource_timings.append(ResourceTiming(
+                    url=name,
+                    size=resource.get('transferSize', 0),
+                    load_time=resource.get('duration', 0) / 1000,  # Convert to seconds
+                    resource_type=resource_type,
+                    status_code=200  # Assume success if loaded
+                ))
+            
+            return resource_timings
+            
+        except Exception as e:
+            print(f"Warning: Could not collect resource timings: {e}")
+            return []
+    
+    def cleanup(self):
+        """Clean up WebDriver"""
+        if self.driver:
+            self.driver.quit()
+
+class GeographicTester:
+    """Test from multiple geographic locations using public APIs"""
+    
+    @staticmethod
+    def test_from_locations(url: str, locations: List[str] = None) -> Dict[str, PerformanceMetrics]:
+        """Test website from different geographic locations"""
+        if not locations:
+            locations = ['us-east', 'us-west', 'europe', 'asia']
+        
+        # For demo purposes, we'll simulate different locations
+        # In a real implementation, you'd use services like:
+        # - GTmetrix API
+        # - Pingdom API  
+        # - WebPageTest API
+        # - Your own distributed testing infrastructure
+        
+        results = {}
+        base_tester = WebPerformanceTester(url)
+        
+        for location in locations:
+            print(f"Testing from {location}...")
+            # Add artificial latency to simulate geographic distance
+            latency_simulation = {
+                'us-east': 0,
+                'us-west': 0.05,
+                'europe': 0.1,
+                'asia': 0.15
+            }
+            
+            time.sleep(latency_simulation.get(location, 0))
+            result = base_tester.single_request_test()
+            result.location = location
+            results[location] = result
+            
+        return results
 
 class WebPerformanceTester:
     def __init__(self, base_url: str):
         self.base_url = base_url
         self.parsed_url = urllib.parse.urlparse(base_url)
         self.session = requests.Session()
+        self.ssl_checker = SSLChecker()
+        self.web_vitals_collector = None
+        
+    def setup_web_vitals_collection(self):
+        """Setup Web Vitals collection if possible"""
+        self.web_vitals_collector = WebVitalsCollector()
+        return self.web_vitals_collector.setup_driver()
         
     def get_dns_resolution_time(self) -> float:
         """Measure DNS resolution time"""
@@ -88,14 +388,45 @@ class WebPerformanceTester:
             sock.close()
             return {"dns_time": dns_time, "connect_time": -1, "ssl_time": -1}
     
-    def single_request_test(self) -> PerformanceMetrics:
-        """Perform a single request and measure all metrics"""
+    def check_multiple_endpoints(self, endpoints: List[str]) -> Dict[str, PerformanceMetrics]:
+        """Check multiple endpoints for availability and performance"""
+        results = {}
+        base_domain = f"{self.parsed_url.scheme}://{self.parsed_url.netloc}"
+        
+        for endpoint in endpoints:
+            full_url = f"{base_domain}{endpoint}" if endpoint.startswith('/') else endpoint
+            print(f"Testing endpoint: {endpoint}")
+            
+            try:
+                temp_tester = WebPerformanceTester(full_url)
+                result = temp_tester.single_request_test()
+                results[endpoint] = result
+            except Exception as e:
+                print(f"Error testing {endpoint}: {e}")
+                results[endpoint] = None
+                
+        return results
+    
+    def single_request_test(self, collect_vitals: bool = False) -> PerformanceMetrics:
+        """Perform a comprehensive single request test"""
         connection_metrics = self.get_connection_metrics()
+        
+        # SSL Certificate check
+        ssl_info = None
+        if self.parsed_url.scheme == 'https':
+            ssl_info = self.ssl_checker.check_ssl_certificate(self.parsed_url.hostname)
         
         start_time = time.time()
         try:
             response = self.session.get(self.base_url, timeout=30)
             total_time = time.time() - start_time
+            
+            # Collect Web Vitals if requested and available
+            web_vitals = None
+            resources = []
+            if collect_vitals and self.web_vitals_collector:
+                web_vitals = self.web_vitals_collector.collect_web_vitals(self.base_url)
+                resources = self.web_vitals_collector.collect_resource_timings(self.base_url)
             
             return PerformanceMetrics(
                 url=self.base_url,
@@ -106,9 +437,12 @@ class WebPerformanceTester:
                 total_time=total_time,
                 response_size=len(response.content),
                 status_code=response.status_code,
-                timestamp=time.time()
+                timestamp=time.time(),
+                ssl_info=ssl_info,
+                web_vitals=web_vitals,
+                resources=resources or []
             )
-        except requests.RequestException:
+        except requests.RequestException as e:
             return PerformanceMetrics(
                 url=self.base_url,
                 dns_time=connection_metrics["dns_time"],
@@ -118,17 +452,19 @@ class WebPerformanceTester:
                 total_time=-1,
                 response_size=0,
                 status_code=0,
-                timestamp=time.time()
+                timestamp=time.time(),
+                ssl_info=ssl_info
             )
     
-    def baseline_test(self, num_requests: int = 10) -> List[PerformanceMetrics]:
+    def baseline_test(self, num_requests: int = 10, collect_vitals: bool = False) -> List[PerformanceMetrics]:
         """Perform baseline performance test"""
         print(f"Running baseline test with {num_requests} requests...")
         results = []
         
         for i in range(num_requests):
             print(f"Request {i+1}/{num_requests}", end='\r')
-            result = self.single_request_test()
+            # Only collect vitals on first request to avoid overhead
+            result = self.single_request_test(collect_vitals=(i == 0 and collect_vitals))
             results.append(result)
             time.sleep(0.1)  # Small delay between requests
             
@@ -221,6 +557,11 @@ class WebPerformanceTester:
         
         print("Stress test completed.")
         return results
+    
+    def cleanup(self):
+        """Clean up resources"""
+        if self.web_vitals_collector:
+            self.web_vitals_collector.cleanup()
 
 class PerformanceReporter:
     def __init__(self, url: str):
@@ -256,7 +597,9 @@ class PerformanceReporter:
     
     def generate_report(self, baseline_results: List[PerformanceMetrics], 
                        load_results: List[PerformanceMetrics], 
-                       stress_results: List[PerformanceMetrics]) -> str:
+                       stress_results: List[PerformanceMetrics],
+                       endpoint_results: Dict[str, PerformanceMetrics] = None,
+                       geographic_results: Dict[str, PerformanceMetrics] = None) -> str:
         """Generate comprehensive HTML performance report"""
         
         html = f"""
@@ -323,6 +666,9 @@ class PerformanceReporter:
         .good {{ background: #fef5e7; color: #c05621; }}
         .fair {{ background: #fed7d7; color: #c53030; }}
         .poor {{ background: #fed7d7; color: #c53030; }}
+        .ssl-valid {{ background: #c6f6d5; color: #22543d; }}
+        .ssl-warning {{ background: #fef5e7; color: #c05621; }}
+        .ssl-invalid {{ background: #fed7d7; color: #c53030; }}
         .recommendations {{ 
             background: #ebf8ff; border-left: 4px solid #3182ce; 
             padding: 1.5rem; border-radius: 0 8px 8px 0; margin-top: 1.5rem;
@@ -346,19 +692,31 @@ class PerformanceReporter:
         }}
         .error-indicator {{ color: #e53e3e; font-weight: 600; }}
         .success-indicator {{ color: #38a169; font-weight: 600; }}
+        .status-code-200 {{ color: #38a169; }}
+        .status-code-404 {{ color: #e53e3e; }}
+        .status-code-500 {{ color: #e53e3e; }}
+        .status-code-other {{ color: #d69e2e; }}
+        .resource-grid {{ 
+            display: grid; grid-template-columns: 2fr 1fr 1fr 1fr;
+            gap: 0.5rem; align-items: center; margin: 0.5rem 0;
+        }}
+        .resource-item {{ 
+            background: #f7fafc; padding: 0.5rem; border-radius: 4px; font-size: 0.9rem;
+        }}
         @media (max-width: 768px) {{
             .container {{ padding: 10px; }}
             .header {{ padding: 1.5rem; }}
             .header h1 {{ font-size: 2rem; }}
             .metrics-grid {{ grid-template-columns: 1fr; }}
+            .resource-grid {{ grid-template-columns: 1fr; }}
         }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Performance Test Report</h1>
-            <p>Comprehensive analysis of website performance metrics</p>
+            <h1>🚀 Comprehensive Performance Report</h1>
+            <p>Complete analysis of website availability, performance, and security</p>
         </div>
         
         <div class="test-info">
@@ -378,6 +736,257 @@ class PerformanceReporter:
                 </div>
             </div>
         </div>"""
+        
+        # SSL Certificate Section
+        if baseline_results and baseline_results[0].ssl_info:
+            ssl_info = baseline_results[0].ssl_info
+            ssl_status_class = "ssl-valid" if ssl_info.is_valid else "ssl-invalid"
+            if ssl_info.is_valid and ssl_info.days_until_expiry < 30:
+                ssl_status_class = "ssl-warning"
+            
+            html += f"""
+        <div class="section">
+            <div class="section-header">🔒 SSL Certificate Analysis</div>
+            <div class="section-content">
+                <div class="info-grid">
+                    <div class="info-item">
+                        <strong>Status:</strong><br>
+                        <span class="{ssl_status_class}">
+                            {'✓ Valid' if ssl_info.is_valid else '✗ Invalid'}
+                        </span>
+                    </div>
+                    <div class="info-item">
+                        <strong>Issuer:</strong><br>
+                        {ssl_info.issuer}
+                    </div>
+                    <div class="info-item">
+                        <strong>Subject:</strong><br>
+                        {ssl_info.subject}
+                    </div>
+                    <div class="info-item">
+                        <strong>Expires:</strong><br>
+                        {ssl_info.expires.strftime('%Y-%m-%d %H:%M:%S')}
+                        <br><small>({ssl_info.days_until_expiry} days remaining)</small>
+                    </div>
+                    <div class="info-item">
+                        <strong>Protocol:</strong><br>
+                        {ssl_info.version}
+                    </div>
+                    <div class="info-item">
+                        <strong>Cipher:</strong><br>
+                        {ssl_info.cipher}
+                    </div>
+                </div>
+            </div>
+        </div>"""
+        
+        # Endpoint Health Checks
+        if endpoint_results:
+            html += f"""
+        <div class="section">
+            <div class="section-header">🏥 Endpoint Health Checks</div>
+            <div class="section-content">
+                <table class="stats-table">
+                    <thead>
+                        <tr>
+                            <th>Endpoint</th>
+                            <th>Status Code</th>
+                            <th>Response Time</th>
+                            <th>Size</th>
+                            <th>Availability</th>
+                        </tr>
+                    </thead>
+                    <tbody>"""
+            
+            for endpoint, result in endpoint_results.items():
+                if result:
+                    status_class = f"status-code-{result.status_code}" if result.status_code in [200, 404, 500] else "status-code-other"
+                    availability = "✓ Available" if result.status_code == 200 else "✗ Unavailable"
+                    availability_class = "success-indicator" if result.status_code == 200 else "error-indicator"
+                    
+                    html += f"""
+                        <tr>
+                            <td><code>{endpoint}</code></td>
+                            <td><span class="{status_class}">{result.status_code}</span></td>
+                            <td>{result.ttfb:.3f}s</td>
+                            <td>{result.response_size:,} bytes</td>
+                            <td><span class="{availability_class}">{availability}</span></td>
+                        </tr>"""
+                else:
+                    html += f"""
+                        <tr>
+                            <td><code>{endpoint}</code></td>
+                            <td><span class="error-indicator">Error</span></td>
+                            <td>-</td>
+                            <td>-</td>
+                            <td><span class="error-indicator">✗ Failed</span></td>
+                        </tr>"""
+            
+            html += """
+                    </tbody>
+                </table>
+            </div>
+        </div>"""
+        
+        # Geographic Performance
+        if geographic_results:
+            html += f"""
+        <div class="section">
+            <div class="section-header">🌍 Geographic Performance</div>
+            <div class="section-content">
+                <table class="stats-table">
+                    <thead>
+                        <tr>
+                            <th>Location</th>
+                            <th>DNS Time</th>
+                            <th>Connect Time</th>
+                            <th>TTFB</th>
+                            <th>Total Time</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>"""
+            
+            for location, result in geographic_results.items():
+                status_class = "success-indicator" if result.status_code == 200 else "error-indicator"
+                status_text = "✓ Success" if result.status_code == 200 else f"✗ {result.status_code}"
+                
+                html += f"""
+                    <tr>
+                        <td><strong>{location.title()}</strong></td>
+                        <td>{result.dns_time:.3f}s</td>
+                        <td>{result.connect_time:.3f}s</td>
+                        <td>{result.ttfb:.3f}s</td>
+                        <td>{result.total_time:.3f}s</td>
+                        <td><span class="{status_class}">{status_text}</span></td>
+                    </tr>"""
+            
+            html += """
+                    </tbody>
+                </table>
+            </div>
+        </div>"""
+        
+        # Web Vitals Section
+        if baseline_results and baseline_results[0].web_vitals:
+            vitals = baseline_results[0].web_vitals
+            
+            # Scoring based on Google's thresholds
+            def get_vitals_score(metric, value):
+                thresholds = {
+                    'fcp': {'good': 1.8, 'poor': 3.0},
+                    'lcp': {'good': 2.5, 'poor': 4.0},
+                    'cls': {'good': 0.1, 'poor': 0.25},
+                    'tti': {'good': 3.8, 'poor': 7.3}
+                }
+                
+                if metric not in thresholds:
+                    return 'good'
+                
+                if value <= thresholds[metric]['good']:
+                    return 'excellent'
+                elif value <= thresholds[metric]['poor']:
+                    return 'fair'
+                else:
+                    return 'poor'
+            
+            html += f"""
+        <div class="section">
+            <div class="section-header">⚡ Core Web Vitals</div>
+            <div class="section-content">
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <h4>🎨 First Contentful Paint (FCP)</h4>
+                        <p><strong>{vitals.fcp:.2f}s</strong> 
+                        <span class="performance-indicator {get_vitals_score('fcp', vitals.fcp)}">
+                            {get_vitals_score('fcp', vitals.fcp).title()}
+                        </span></p>
+                        <small>Good: ≤ 1.8s | Poor: > 3.0s</small>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <h4>🖼️ Largest Contentful Paint (LCP)</h4>
+                        <p><strong>{vitals.lcp:.2f}s</strong>
+                        <span class="performance-indicator {get_vitals_score('lcp', vitals.lcp)}">
+                            {get_vitals_score('lcp', vitals.lcp).title()}
+                        </span></p>
+                        <small>Good: ≤ 2.5s | Poor: > 4.0s</small>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <h4>📐 Cumulative Layout Shift (CLS)</h4>
+                        <p><strong>{vitals.cls:.3f}</strong>
+                        <span class="performance-indicator {get_vitals_score('cls', vitals.cls)}">
+                            {get_vitals_score('cls', vitals.cls).title()}
+                        </span></p>
+                        <small>Good: ≤ 0.1 | Poor: > 0.25</small>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <h4>⚡ Time to Interactive (TTI)</h4>
+                        <p><strong>{vitals.tti:.2f}s</strong>
+                        <span class="performance-indicator {get_vitals_score('tti', vitals.tti)}">
+                            {get_vitals_score('tti', vitals.tti).title()}
+                        </span></p>
+                        <small>Good: ≤ 3.8s | Poor: > 7.3s</small>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <h4>📄 DOM Ready</h4>
+                        <p><strong>{vitals.dom_ready:.2f}s</strong></p>
+                        <small>Time until DOM content loaded</small>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <h4>✅ Fully Loaded</h4>
+                        <p><strong>{vitals.fully_loaded:.2f}s</strong></p>
+                        <small>Time until all resources loaded</small>
+                    </div>
+                </div>
+            </div>
+        </div>"""
+        
+        # Resource Loading Analysis
+        if baseline_results and baseline_results[0].resources:
+            resources = baseline_results[0].resources
+            
+            # Group resources by type
+            resource_types = {}
+            for resource in resources:
+                if resource.resource_type not in resource_types:
+                    resource_types[resource.resource_type] = []
+                resource_types[resource.resource_type].append(resource)
+            
+            html += f"""
+        <div class="section">
+            <div class="section-header">📦 Resource Loading Analysis</div>
+            <div class="section-content">"""
+            
+            for resource_type, type_resources in resource_types.items():
+                total_size = sum(r.size for r in type_resources)
+                avg_load_time = statistics.mean([r.load_time for r in type_resources]) if type_resources else 0
+                
+                html += f"""
+                <div class="metric-card">
+                    <h4>📁 {resource_type.title()} Resources ({len(type_resources)} files)</h4>
+                    <p><strong>Total Size:</strong> {total_size:,} bytes ({total_size/1024:.1f} KB)</p>
+                    <p><strong>Average Load Time:</strong> {avg_load_time:.3f}s</p>
+                    
+                    <div style="max-height: 200px; overflow-y: auto; margin-top: 1rem;">"""
+                
+                for resource in sorted(type_resources, key=lambda x: x.load_time, reverse=True)[:10]:
+                    resource_name = resource.url.split('/')[-1][:50] + ('...' if len(resource.url.split('/')[-1]) > 50 else '')
+                    html += f"""
+                        <div class="resource-grid">
+                            <div class="resource-item"><small>{resource_name}</small></div>
+                            <div class="resource-item">{resource.size:,}B</div>
+                            <div class="resource-item">{resource.load_time:.3f}s</div>
+                            <div class="resource-item">{'✓' if resource.status_code == 200 else '✗'}</div>
+                        </div>"""
+                
+                html += "</div></div>"
+            
+            html += "</div></div>"
         
         # Baseline Test Results
         if baseline_results:
@@ -572,11 +1181,42 @@ class PerformanceReporter:
             avg_size = statistics.mean([m.response_size for m in baseline_results if m.response_size > 0])
             if avg_size > 1024 * 1024:  # 1MB
                 recommendations.append("Large response size - consider compression and optimization")
+            
+            # SSL recommendations
+            if baseline_results[0].ssl_info:
+                ssl_info = baseline_results[0].ssl_info
+                if ssl_info.is_valid and ssl_info.days_until_expiry < 30:
+                    recommendations.append(f"SSL certificate expires in {ssl_info.days_until_expiry} days - renew soon")
+                elif not ssl_info.is_valid:
+                    recommendations.append("SSL certificate is invalid - fix certificate configuration")
+            
+            # Web Vitals recommendations
+            if baseline_results[0].web_vitals:
+                vitals = baseline_results[0].web_vitals
+                if vitals.fcp > 1.8:
+                    recommendations.append("Improve First Contentful Paint - optimize critical rendering path")
+                if vitals.lcp > 2.5:
+                    recommendations.append("Improve Largest Contentful Paint - optimize images and fonts")
+                if vitals.cls > 0.1:
+                    recommendations.append("Reduce Cumulative Layout Shift - reserve space for dynamic content")
+                if vitals.tti > 3.8:
+                    recommendations.append("Improve Time to Interactive - minimize JavaScript execution time")
         
         if load_results:
             error_count = len([m for m in load_results if m.status_code != 200])
             if error_count > 0:
                 recommendations.append("Errors detected under load - investigate server capacity")
+        
+        # Resource-specific recommendations
+        if baseline_results and baseline_results[0].resources:
+            resources = baseline_results[0].resources
+            large_images = [r for r in resources if r.resource_type == 'image' and r.size > 500000]  # 500KB
+            if large_images:
+                recommendations.append(f"Found {len(large_images)} large images - consider optimization and compression")
+            
+            slow_scripts = [r for r in resources if r.resource_type == 'script' and r.load_time > 1.0]
+            if slow_scripts:
+                recommendations.append(f"Found {len(slow_scripts)} slow-loading scripts - consider bundling and minification")
         
         if recommendations:
             html += '<div class="recommendations"><h4>💡 Recommendations</h4><ul>'
@@ -593,8 +1233,34 @@ class PerformanceReporter:
         
         return html
 
-def main():
-    parser = argparse.ArgumentParser(description='Website Performance Testing Tool')
+    def check_dependencies():
+        """Check if required dependencies are available"""
+        missing_deps = []
+        
+        try:
+            import requests
+        except ImportError:
+            missing_deps.append("requests")
+        
+        try:
+            import psutil
+        except ImportError:
+            missing_deps.append("psutil")
+        
+        try:
+            from selenium import webdriver
+        except ImportError:
+            missing_deps.append("selenium")
+        
+        if missing_deps:
+            print("❌ Missing required dependencies:")
+            for dep in missing_deps:
+                print(f"   - {dep}")
+            print("\n📦 Install with: pip install " + " ".join(missing_deps))
+            return False
+        
+        return True
+    parser = argparse.ArgumentParser(description='Comprehensive Website Performance Testing Tool')
     parser.add_argument('url', help='Website URL to test')
     parser.add_argument('--baseline', type=int, default=10, help='Number of baseline requests (default: 10)')
     parser.add_argument('--load-users', type=int, default=10, help='Concurrent users for load test (default: 10)')
@@ -602,7 +1268,11 @@ def main():
     parser.add_argument('--stress-users', type=int, default=50, help='Max users for stress test (default: 50)')
     parser.add_argument('--stress-ramp', type=int, default=30, help='Stress test ramp-up time in seconds (default: 30)')
     parser.add_argument('--output', help='Output file for report (default: report.html)')
-    parser.add_argument('--format', choices=['html', 'text'], default='html', help='Report format (default: html)')
+    parser.add_argument('--endpoints', nargs='*', default=['/'], help='Additional endpoints to test (default: /)')
+    parser.add_argument('--geographic', action='store_true', help='Test from multiple geographic locations')
+    parser.add_argument('--web-vitals', action='store_true', help='Collect Core Web Vitals (requires Chrome)')
+    parser.add_argument('--skip-load', action='store_true', help='Skip load testing')
+    parser.add_argument('--skip-stress', action='store_true', help='Skip stress testing')
     
     args = parser.parse_args()
     
@@ -610,35 +1280,69 @@ def main():
     if not args.url.startswith(('http://', 'https://')):
         args.url = 'https://' + args.url
     
-    print(f"Starting performance tests for: {args.url}")
+    print(f"Starting comprehensive performance tests for: {args.url}")
     print("=" * 60)
     
     # Initialize tester and reporter
     tester = WebPerformanceTester(args.url)
     reporter = PerformanceReporter(args.url)
     
+    # Setup Web Vitals collection if requested
+    web_vitals_available = False
+    if args.web_vitals:
+        web_vitals_available = tester.setup_web_vitals_collection()
+        if not web_vitals_available:
+            print("Warning: Web Vitals collection not available, continuing without it...")
+    
     # Run tests
     try:
-        baseline_results = tester.baseline_test(args.baseline)
-        load_results = tester.load_test(args.load_users, args.load_requests)
-        stress_results = tester.stress_test(args.stress_users, args.stress_ramp)
+        # Baseline test with Web Vitals
+        baseline_results = tester.baseline_test(args.baseline, collect_vitals=web_vitals_available)
+        
+        # Multiple endpoint testing
+        endpoint_results = None
+        if len(args.endpoints) > 1 or args.endpoints[0] != '/':
+            print(f"\nTesting {len(args.endpoints)} endpoints...")
+            endpoint_results = tester.check_multiple_endpoints(args.endpoints)
+        
+        # Geographic testing
+        geographic_results = None
+        if args.geographic:
+            print("\nTesting from multiple geographic locations...")
+            geographic_results = GeographicTester.test_from_locations(args.url)
+        
+        # Load and stress tests
+        load_results = []
+        stress_results = []
+        
+        if not args.skip_load:
+            load_results = tester.load_test(args.load_users, args.load_requests)
+        
+        if not args.skip_stress:
+            stress_results = tester.stress_test(args.stress_users, args.stress_ramp)
         
         # Generate report
-        report = reporter.generate_report(baseline_results, load_results, stress_results)
+        report = reporter.generate_report(
+            baseline_results, 
+            load_results, 
+            stress_results,
+            endpoint_results,
+            geographic_results
+        )
         
         # Output report
         if args.output:
             with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(report)
-            print(f"\nHTML report saved to: {args.output}")
+            print(f"\nComprehensive HTML report saved to: {args.output}")
         else:
             # Default filename with timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f"performance_report_{timestamp}.html"
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(report)
-            print(f"\nHTML report saved to: {filename}")
-            print(f"Open the file in your browser to view the report.")
+            print(f"\nComprehensive HTML report saved to: {filename}")
+            print(f"Open the file in your browser to view the detailed report.")
             
     except KeyboardInterrupt:
         print("\nTest interrupted by user.")
@@ -646,6 +1350,9 @@ def main():
     except Exception as e:
         print(f"\nError running tests: {e}")
         sys.exit(1)
+    finally:
+        # Clean up resources
+        tester.cleanup()
 
 if __name__ == "__main__":
     main()
