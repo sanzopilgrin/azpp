@@ -257,75 +257,233 @@ class PerformanceReporter:
     def generate_report(self, baseline_results: List[PerformanceMetrics], 
                        load_results: List[PerformanceMetrics], 
                        stress_results: List[PerformanceMetrics]) -> str:
-        """Generate comprehensive performance report"""
+        """Generate comprehensive HTML performance report"""
         
-        report = []
-        report.append("=" * 80)
-        report.append("WEBSITE PERFORMANCE TEST REPORT")
-        report.append("=" * 80)
-        report.append(f"URL: {self.url}")
-        report.append(f"Test Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        report.append(f"System: {psutil.cpu_count()} CPU cores, {psutil.virtual_memory().total // (1024**3)} GB RAM")
-        report.append("")
+        html = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Performance Test Report - {self.url}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6; color: #333; background: #f8f9fa; margin: 0;
+        }}
+        .container {{ max-width: 1200px; margin: 0 auto; padding: 20px; }}
+        .header {{ 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; padding: 2rem; border-radius: 10px; margin-bottom: 2rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        .header h1 {{ font-size: 2.5rem; margin-bottom: 0.5rem; }}
+        .header p {{ font-size: 1.1rem; opacity: 0.9; }}
+        .test-info {{ 
+            background: white; padding: 1.5rem; border-radius: 8px; 
+            margin-bottom: 2rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .test-info h2 {{ color: #4a5568; margin-bottom: 1rem; }}
+        .info-grid {{ 
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem; margin-top: 1rem;
+        }}
+        .info-item {{ background: #f7fafc; padding: 1rem; border-radius: 6px; }}
+        .info-item strong {{ color: #2d3748; }}
+        .section {{ 
+            background: white; margin-bottom: 2rem; border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow: hidden;
+        }}
+        .section-header {{ 
+            background: #4a5568; color: white; padding: 1rem 1.5rem; 
+            font-size: 1.2rem; font-weight: 600;
+        }}
+        .section-content {{ padding: 1.5rem; }}
+        .metrics-grid {{ 
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem; margin-bottom: 1.5rem;
+        }}
+        .metric-card {{ 
+            background: #f7fafc; border-radius: 8px; padding: 1.5rem;
+            border-left: 4px solid #667eea;
+        }}
+        .metric-card h4 {{ color: #2d3748; margin-bottom: 1rem; font-size: 1.1rem; }}
+        .stats-table {{ width: 100%; border-collapse: collapse; margin-top: 1rem; }}
+        .stats-table th, .stats-table td {{ 
+            padding: 0.75rem; text-align: left; border-bottom: 1px solid #e2e8f0;
+        }}
+        .stats-table th {{ background: #edf2f7; font-weight: 600; color: #4a5568; }}
+        .stats-table tr:hover {{ background: #f7fafc; }}
+        .performance-indicator {{ 
+            display: inline-block; padding: 0.25rem 0.75rem; border-radius: 20px;
+            font-size: 0.9rem; font-weight: 600; margin-left: 0.5rem;
+        }}
+        .excellent {{ background: #c6f6d5; color: #22543d; }}
+        .good {{ background: #fef5e7; color: #c05621; }}
+        .fair {{ background: #fed7d7; color: #c53030; }}
+        .poor {{ background: #fed7d7; color: #c53030; }}
+        .recommendations {{ 
+            background: #ebf8ff; border-left: 4px solid #3182ce; 
+            padding: 1.5rem; border-radius: 0 8px 8px 0; margin-top: 1.5rem;
+        }}
+        .recommendations h4 {{ color: #2c5282; margin-bottom: 1rem; }}
+        .recommendations ul {{ list-style: none; }}
+        .recommendations li {{ 
+            margin-bottom: 0.5rem; padding-left: 1.5rem; position: relative;
+        }}
+        .recommendations li:before {{ 
+            content: "→"; position: absolute; left: 0; color: #3182ce; font-weight: bold;
+        }}
+        .chart-container {{ margin: 1.5rem 0; }}
+        .progress-bar {{ 
+            background: #e2e8f0; height: 20px; border-radius: 10px; overflow: hidden;
+            margin: 0.5rem 0;
+        }}
+        .progress-fill {{ 
+            height: 100%; background: linear-gradient(90deg, #48bb78, #38a169);
+            transition: width 0.3s ease;
+        }}
+        .error-indicator {{ color: #e53e3e; font-weight: 600; }}
+        .success-indicator {{ color: #38a169; font-weight: 600; }}
+        @media (max-width: 768px) {{
+            .container {{ padding: 10px; }}
+            .header {{ padding: 1.5rem; }}
+            .header h1 {{ font-size: 2rem; }}
+            .metrics-grid {{ grid-template-columns: 1fr; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Performance Test Report</h1>
+            <p>Comprehensive analysis of website performance metrics</p>
+        </div>
+        
+        <div class="test-info">
+            <h2>Test Information</h2>
+            <div class="info-grid">
+                <div class="info-item">
+                    <strong>URL:</strong><br>
+                    <code>{self.url}</code>
+                </div>
+                <div class="info-item">
+                    <strong>Test Date:</strong><br>
+                    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                </div>
+                <div class="info-item">
+                    <strong>System:</strong><br>
+                    {psutil.cpu_count()} CPU cores, {psutil.virtual_memory().total // (1024**3)} GB RAM
+                </div>
+            </div>
+        </div>"""
         
         # Baseline Test Results
-        report.append("BASELINE PERFORMANCE TEST")
-        report.append("-" * 40)
         if baseline_results:
             success_rate = len([m for m in baseline_results if m.status_code == 200]) / len(baseline_results) * 100
-            report.append(f"Requests: {len(baseline_results)}")
-            report.append(f"Success Rate: {success_rate:.1f}%")
-            
-            # Response Time Statistics
             ttfb_stats = self.calculate_statistics(baseline_results, 'ttfb')
             total_stats = self.calculate_statistics(baseline_results, 'total_time')
+            avg_size = statistics.mean([m.response_size for m in baseline_results if m.response_size > 0])
             
-            report.append("\nResponse Time Statistics (seconds):")
-            report.append(f"  Time to First Byte (TTFB):")
-            report.append(f"    Min: {ttfb_stats['min']:.3f}s | Max: {ttfb_stats['max']:.3f}s")
-            report.append(f"    Mean: {ttfb_stats['mean']:.3f}s | Median: {ttfb_stats['median']:.3f}s")
-            report.append(f"    95th percentile: {ttfb_stats['p95']:.3f}s | 99th percentile: {ttfb_stats['p99']:.3f}s")
-            
-            report.append(f"  Total Response Time:")
-            report.append(f"    Min: {total_stats['min']:.3f}s | Max: {total_stats['max']:.3f}s")
-            report.append(f"    Mean: {total_stats['mean']:.3f}s | Median: {total_stats['median']:.3f}s")
-            report.append(f"    95th percentile: {total_stats['p95']:.3f}s | 99th percentile: {total_stats['p99']:.3f}s")
+            html += f"""
+        <div class="section">
+            <div class="section-header">📊 Baseline Performance Test</div>
+            <div class="section-content">
+                <div class="info-grid">
+                    <div class="info-item">
+                        <strong>Requests:</strong> {len(baseline_results)}
+                    </div>
+                    <div class="info-item">
+                        <strong>Success Rate:</strong> 
+                        <span class="{'success-indicator' if success_rate >= 95 else 'error-indicator'}">{success_rate:.1f}%</span>
+                    </div>
+                    <div class="info-item">
+                        <strong>Avg Response Size:</strong> {avg_size:,.0f} bytes ({avg_size/1024:.1f} KB)
+                    </div>
+                </div>
+                
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <h4>⏱️ Time to First Byte (TTFB)</h4>
+                        <table class="stats-table">
+                            <tr><td>Min</td><td>{ttfb_stats['min']:.3f}s</td></tr>
+                            <tr><td>Mean</td><td><strong>{ttfb_stats['mean']:.3f}s</strong></td></tr>
+                            <tr><td>Median</td><td>{ttfb_stats['median']:.3f}s</td></tr>
+                            <tr><td>95th percentile</td><td>{ttfb_stats['p95']:.3f}s</td></tr>
+                            <tr><td>99th percentile</td><td>{ttfb_stats['p99']:.3f}s</td></tr>
+                            <tr><td>Max</td><td>{ttfb_stats['max']:.3f}s</td></tr>
+                        </table>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <h4>🔄 Total Response Time</h4>
+                        <table class="stats-table">
+                            <tr><td>Min</td><td>{total_stats['min']:.3f}s</td></tr>
+                            <tr><td>Mean</td><td><strong>{total_stats['mean']:.3f}s</strong></td></tr>
+                            <tr><td>Median</td><td>{total_stats['median']:.3f}s</td></tr>
+                            <tr><td>95th percentile</td><td>{total_stats['p95']:.3f}s</td></tr>
+                            <tr><td>99th percentile</td><td>{total_stats['p99']:.3f}s</td></tr>
+                            <tr><td>Max</td><td>{total_stats['max']:.3f}s</td></tr>
+                        </table>
+                    </div>
+                </div>"""
             
             # Connection Statistics
             if baseline_results[0].dns_time > 0:
                 dns_stats = self.calculate_statistics(baseline_results, 'dns_time')
                 connect_stats = self.calculate_statistics(baseline_results, 'connect_time')
                 
-                report.append("\nConnection Statistics:")
-                report.append(f"  DNS Resolution: {dns_stats['mean']:.3f}s (avg)")
-                report.append(f"  TCP Connection: {connect_stats['mean']:.3f}s (avg)")
+                html += f"""
+                <div class="metric-card">
+                    <h4>🌐 Connection Statistics</h4>
+                    <table class="stats-table">
+                        <tr><td>DNS Resolution</td><td>{dns_stats['mean']:.3f}s</td></tr>
+                        <tr><td>TCP Connection</td><td>{connect_stats['mean']:.3f}s</td></tr>"""
                 
                 if baseline_results[0].ssl_time > 0:
                     ssl_stats = self.calculate_statistics(baseline_results, 'ssl_time')
-                    report.append(f"  SSL Handshake: {ssl_stats['mean']:.3f}s (avg)")
+                    html += f"<tr><td>SSL Handshake</td><td>{ssl_stats['mean']:.3f}s</td></tr>"
+                
+                html += "</table></div>"
             
-            # Response Size
-            avg_size = statistics.mean([m.response_size for m in baseline_results if m.response_size > 0])
-            report.append(f"\nAverage Response Size: {avg_size:,.0f} bytes ({avg_size/1024:.1f} KB)")
-        
-        report.append("")
+            html += "</div></div>"
         
         # Load Test Results
-        report.append("LOAD TEST RESULTS")
-        report.append("-" * 40)
         if load_results:
             success_rate = len([m for m in load_results if m.status_code == 200]) / len(load_results) * 100
             duration = max([m.timestamp for m in load_results]) - min([m.timestamp for m in load_results])
             rps = len(load_results) / duration if duration > 0 else 0
-            
-            report.append(f"Total Requests: {len(load_results)}")
-            report.append(f"Success Rate: {success_rate:.1f}%")
-            report.append(f"Requests per Second: {rps:.2f}")
-            report.append(f"Test Duration: {duration:.2f}s")
-            
             ttfb_stats = self.calculate_statistics(load_results, 'ttfb')
-            report.append(f"\nResponse Time Under Load:")
-            report.append(f"  TTFB Mean: {ttfb_stats['mean']:.3f}s | 95th: {ttfb_stats['p95']:.3f}s | 99th: {ttfb_stats['p99']:.3f}s")
+            
+            html += f"""
+        <div class="section">
+            <div class="section-header">⚡ Load Test Results</div>
+            <div class="section-content">
+                <div class="info-grid">
+                    <div class="info-item">
+                        <strong>Total Requests:</strong> {len(load_results)}
+                    </div>
+                    <div class="info-item">
+                        <strong>Success Rate:</strong> 
+                        <span class="{'success-indicator' if success_rate >= 95 else 'error-indicator'}">{success_rate:.1f}%</span>
+                    </div>
+                    <div class="info-item">
+                        <strong>Requests/Second:</strong> <strong>{rps:.2f}</strong>
+                    </div>
+                    <div class="info-item">
+                        <strong>Test Duration:</strong> {duration:.2f}s
+                    </div>
+                </div>
+                
+                <div class="metric-card">
+                    <h4>📈 Response Time Under Load</h4>
+                    <table class="stats-table">
+                        <tr><td>TTFB Mean</td><td><strong>{ttfb_stats['mean']:.3f}s</strong></td></tr>
+                        <tr><td>TTFB 95th percentile</td><td>{ttfb_stats['p95']:.3f}s</td></tr>
+                        <tr><td>TTFB 99th percentile</td><td>{ttfb_stats['p99']:.3f}s</td></tr>
+                    </table>
+                </div>"""
             
             # Error analysis
             error_codes = {}
@@ -334,68 +492,106 @@ class PerformanceReporter:
                     error_codes[result.status_code] = error_codes.get(result.status_code, 0) + 1
             
             if error_codes:
-                report.append(f"\nError Distribution:")
+                html += '<div class="metric-card"><h4>❌ Error Distribution</h4><table class="stats-table">'
                 for code, count in error_codes.items():
-                    report.append(f"  HTTP {code}: {count} requests")
-        
-        report.append("")
+                    html += f'<tr><td>HTTP {code}</td><td class="error-indicator">{count} requests</td></tr>'
+                html += '</table></div>'
+            
+            html += "</div></div>"
         
         # Stress Test Results
-        report.append("STRESS TEST RESULTS")
-        report.append("-" * 40)
         if stress_results:
             success_rate = len([m for m in stress_results if m.status_code == 200]) / len(stress_results) * 100
-            report.append(f"Total Requests: {len(stress_results)}")
-            report.append(f"Success Rate: {success_rate:.1f}%")
-            
             ttfb_stats = self.calculate_statistics(stress_results, 'ttfb')
-            report.append(f"\nResponse Time Under Stress:")
-            report.append(f"  TTFB Mean: {ttfb_stats['mean']:.3f}s | 95th: {ttfb_stats['p95']:.3f}s | 99th: {ttfb_stats['p99']:.3f}s")
-        
-        report.append("")
+            
+            html += f"""
+        <div class="section">
+            <div class="section-header">🔥 Stress Test Results</div>
+            <div class="section-content">
+                <div class="info-grid">
+                    <div class="info-item">
+                        <strong>Total Requests:</strong> {len(stress_results)}
+                    </div>
+                    <div class="info-item">
+                        <strong>Success Rate:</strong> 
+                        <span class="{'success-indicator' if success_rate >= 95 else 'error-indicator'}">{success_rate:.1f}%</span>
+                    </div>
+                </div>
+                
+                <div class="metric-card">
+                    <h4>⚡ Response Time Under Stress</h4>
+                    <table class="stats-table">
+                        <tr><td>TTFB Mean</td><td><strong>{ttfb_stats['mean']:.3f}s</strong></td></tr>
+                        <tr><td>TTFB 95th percentile</td><td>{ttfb_stats['p95']:.3f}s</td></tr>
+                        <tr><td>TTFB 99th percentile</td><td>{ttfb_stats['p99']:.3f}s</td></tr>
+                    </table>
+                </div>
+            </div>
+        </div>"""
         
         # Performance Analysis
-        report.append("PERFORMANCE ANALYSIS")
-        report.append("-" * 40)
+        html += '<div class="section"><div class="section-header">📊 Performance Analysis</div><div class="section-content">'
         
         if baseline_results and load_results:
             baseline_ttfb = self.calculate_statistics(baseline_results, 'ttfb')['mean']
             load_ttfb = self.calculate_statistics(load_results, 'ttfb')['mean']
             degradation = ((load_ttfb - baseline_ttfb) / baseline_ttfb * 100) if baseline_ttfb > 0 else 0
             
-            report.append(f"Performance degradation under load: {degradation:.1f}%")
-            
             if degradation < 10:
-                report.append("✓ Excellent: Minimal performance degradation under load")
+                indicator_class = "excellent"
+                indicator_text = "✓ Excellent: Minimal performance degradation"
             elif degradation < 25:
-                report.append("⚠ Good: Acceptable performance degradation")
+                indicator_class = "good"
+                indicator_text = "⚠ Good: Acceptable performance degradation"
             elif degradation < 50:
-                report.append("⚠ Fair: Noticeable performance degradation")
+                indicator_class = "fair"
+                indicator_text = "⚠ Fair: Noticeable performance degradation"
             else:
-                report.append("✗ Poor: Significant performance degradation")
+                indicator_class = "poor"
+                indicator_text = "✗ Poor: Significant performance degradation"
+            
+            html += f"""
+            <div class="metric-card">
+                <h4>📈 Performance Degradation Analysis</h4>
+                <p><strong>Performance degradation under load:</strong> {degradation:.1f}%</p>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {min(degradation, 100)}%"></div>
+                </div>
+                <span class="performance-indicator {indicator_class}">{indicator_text}</span>
+            </div>"""
         
         # Recommendations
-        report.append("\nRECOMMendations:")
+        recommendations = []
         if baseline_results:
             avg_ttfb = self.calculate_statistics(baseline_results, 'ttfb')['mean']
             if avg_ttfb > 1.0:
-                report.append("• High TTFB detected - optimize server response time")
+                recommendations.append("High TTFB detected - optimize server response time")
             if avg_ttfb > 0.5:
-                report.append("• Consider implementing caching strategies")
+                recommendations.append("Consider implementing caching strategies")
             
             avg_size = statistics.mean([m.response_size for m in baseline_results if m.response_size > 0])
             if avg_size > 1024 * 1024:  # 1MB
-                report.append("• Large response size - consider compression and optimization")
+                recommendations.append("Large response size - consider compression and optimization")
         
         if load_results:
             error_count = len([m for m in load_results if m.status_code != 200])
             if error_count > 0:
-                report.append("• Errors detected under load - investigate server capacity")
+                recommendations.append("Errors detected under load - investigate server capacity")
         
-        report.append("")
-        report.append("=" * 80)
+        if recommendations:
+            html += '<div class="recommendations"><h4>💡 Recommendations</h4><ul>'
+            for rec in recommendations:
+                html += f'<li>{rec}</li>'
+            html += '</ul></div>'
         
-        return "\n".join(report)
+        html += """
+                </div>
+            </div>
+        </div>
+    </body>
+</html>"""
+        
+        return html
 
 def main():
     parser = argparse.ArgumentParser(description='Website Performance Testing Tool')
@@ -405,7 +601,8 @@ def main():
     parser.add_argument('--load-requests', type=int, default=5, help='Requests per user in load test (default: 5)')
     parser.add_argument('--stress-users', type=int, default=50, help='Max users for stress test (default: 50)')
     parser.add_argument('--stress-ramp', type=int, default=30, help='Stress test ramp-up time in seconds (default: 30)')
-    parser.add_argument('--output', help='Output file for report (default: stdout)')
+    parser.add_argument('--output', help='Output file for report (default: report.html)')
+    parser.add_argument('--format', choices=['html', 'text'], default='html', help='Report format (default: html)')
     
     args = parser.parse_args()
     
@@ -431,11 +628,17 @@ def main():
         
         # Output report
         if args.output:
-            with open(args.output, 'w') as f:
+            with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(report)
-            print(f"\nReport saved to: {args.output}")
+            print(f"\nHTML report saved to: {args.output}")
         else:
-            print("\n" + report)
+            # Default filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"performance_report_{timestamp}.html"
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(report)
+            print(f"\nHTML report saved to: {filename}")
+            print(f"Open the file in your browser to view the report.")
             
     except KeyboardInterrupt:
         print("\nTest interrupted by user.")
